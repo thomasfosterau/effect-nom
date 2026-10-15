@@ -153,7 +153,7 @@ export const any: Parser<string> = make(anyStep as any, "any")
  * @since 0.1.0
  * @category tokens
  */
-export const anyToken = <I extends Input = string>(): Parser<Token<I>, never, never, I> => any as any
+export const anyToken = <I extends Input = string>(): Parser<Token<NoInfer<I>>, never, never, NoInfer<I>> => any as any
 
 /**
  * Matches a literal sequence of tokens (winnow's `literal`, nom's `tag`).
@@ -219,7 +219,7 @@ export const literalImpl = (lit: Input, caseless: boolean): Parser<any, never, n
  * @since 0.1.0
  * @category tokens
  */
-export const oneOf = <I extends Input = string>(set: TokenSet<I>): Parser<Token<I>, never, never, I> => {
+export const oneOf = <I extends Input = string>(set: TokenSet<I>): Parser<Token<NoInfer<I>>, never, never, NoInfer<I>> => {
   const m = compileAny(set)
   const expected = [m.description]
   return make((state) => {
@@ -237,7 +237,7 @@ export const oneOf = <I extends Input = string>(set: TokenSet<I>): Parser<Token<
  * @since 0.1.0
  * @category tokens
  */
-export const noneOf = <I extends Input = string>(set: TokenSet<I>): Parser<Token<I>, never, never, I> => {
+export const noneOf = <I extends Input = string>(set: TokenSet<I>): Parser<Token<NoInfer<I>>, never, never, NoInfer<I>> => {
   const m = compileAny(set)
   const expected = [`anything but ${m.description}`]
   return make((state) => {
@@ -254,7 +254,7 @@ export const noneOf = <I extends Input = string>(set: TokenSet<I>): Parser<Token
  * @since 0.1.0
  * @category slices
  */
-export const take = <I extends Input = string>(count: number): Parser<Slice<I>, never, never, I> => {
+export const take = <I extends Input = string>(count: number): Parser<Slice<NoInfer<I>>, never, never, NoInfer<I>> => {
   const expected = [count === 1 ? "1 token" : `${count} tokens`]
   return make((state) => {
     const start = state.pos
@@ -279,7 +279,7 @@ export const takeWhileImpl = <I extends Input>(
   name: string,
   description?: string,
   kind: ErrorKind = "TakeWhile"
-): Parser<Slice<I>, never, never, I> => {
+): Parser<Slice<NoInfer<I>>, never, never, NoInfer<I>> => {
   const m = compileAny(set)
   const [min, max] = normalize(r)
   const expected = [description ?? (negate ? `anything but ${m.description}` : m.description)]
@@ -315,7 +315,7 @@ export const takeWhileImpl = <I extends Input>(
 export const takeWhile = <I extends Input = string>(
   set: TokenSet<I>,
   range?: Range
-): Parser<Slice<I>, never, never, I> => takeWhileImpl(set, range, false, "takeWhile")
+): Parser<Slice<NoInfer<I>>, never, never, NoInfer<I>> => takeWhileImpl(set, range, false, "takeWhile")
 
 /**
  * Takes the longest run of tokens *not* belonging to a set (winnow's
@@ -327,7 +327,7 @@ export const takeWhile = <I extends Input = string>(
 export const takeTill = <I extends Input = string>(
   set: TokenSet<I>,
   range?: Range
-): Parser<Slice<I>, never, never, I> => takeWhileImpl(set, range, true, "takeTill")
+): Parser<Slice<NoInfer<I>>, never, never, NoInfer<I>> => takeWhileImpl(set, range, true, "takeTill")
 
 /**
  * Takes tokens up to (not including) the first occurrence of a literal
@@ -383,7 +383,7 @@ export const rest: Parser<string> = make((state: State<any>) => {
  * @since 0.1.0
  * @category slices
  */
-export const restOf = <I extends Input = string>(): Parser<Slice<I>, never, never, I> => rest as any
+export const restOf = <I extends Input = string>(): Parser<Slice<NoInfer<I>>, never, never, NoInfer<I>> => rest as any
 
 /**
  * Returns the length of the remaining input without consuming it (winnow's
@@ -403,4 +403,4 @@ export const restLen: Parser<number, never, never, Input> = make((state) => stat
  */
 export const satisfy = <I extends Input = string>(
   predicate: (token: Token<I>) => boolean
-): Parser<Token<I>, never, never, I> => oneOf<I>(predicate as any)
+): Parser<Token<NoInfer<I>>, never, never, NoInfer<I>> => oneOf<I>(predicate as any)
