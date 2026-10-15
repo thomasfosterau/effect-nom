@@ -33,6 +33,7 @@ import {
   NoMatch,
   scan
 } from "./internal/tokens.js"
+import type { ErrorKind } from "./ParseError.js"
 import type { Parser, Range } from "./Parser.js"
 import { make } from "./Parser.js"
 
@@ -184,17 +185,21 @@ export const literalImpl = (lit: Input, caseless: boolean): Parser<any, never, n
     ? describeBytes(lit)
     : `[${lit.map((t) => JSON.stringify(t)).join(", ")}]`
   const expected = [caseless ? `${description} (case insensitive)` : description]
-  const len = lit.length
+  // A string literal may also be matched against byte input (as UTF-8)
+  const asBytes = typeof lit === "string" ? new TextEncoder().encode(lit) : undefined
+  const literalKind = typeof lit === "string" ? 0 : lit instanceof Uint8Array ? 1 : 2
   return make((state: State<Input>) => {
     const pos = state.pos
-    const r = matchLiteral(state, lit, caseless)
+    const l = asBytes !== undefined && state.inputKind === 1 ? asBytes : lit
+    const len = l.length
+    const r = matchLiteral(state, l, caseless)
     if (r === -1) return state.backtrack("Literal", expected)
     if (r === -2) {
       if (state.partial) return state.incomplete(len - (state.end - pos), expected)
       return state.backtrack("Literal", expected)
     }
     state.pos = pos + len
-    return caseless ? state.slice(pos, pos + len) : lit
+    return caseless || state.inputKind !== literalKind ? state.slice(pos, pos + len) : lit
   }, description)
 }
 
@@ -266,20 +271,23 @@ const normalize = (r: Range | undefined): [number, number] => {
   return [r.min ?? 0, r.max ?? Infinity]
 }
 
-const takeWhileImpl = <I extends Input>(
+/** @internal */
+export const takeWhileImpl = <I extends Input>(
   set: unknown,
   r: Range | undefined,
   negate: boolean,
-  name: string
+  name: string,
+  description?: string,
+  kind: ErrorKind = "TakeWhile"
 ): Parser<Slice<I>, never, never, I> => {
   const m = compileAny(set)
   const [min, max] = normalize(r)
-  const expected = [negate ? `anything but ${m.description}` : m.description]
+  const expected = [description ?? (negate ? `anything but ${m.description}` : m.description)]
   return make((state) => {
     const start = state.pos
     const { count, hitEnd, offset } = scan(state, m, negate, max)
     if (hitEnd && state.partial) return state.incomplete(1, expected)
-    if (count < min) return state.backtrack("TakeWhile", expected, offset)
+    if (count < min) return state.backtrack(kind, expected, offset)
     state.pos = offset
     return state.slice(start, offset)
   }, name)

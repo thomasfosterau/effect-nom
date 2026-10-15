@@ -1,0 +1,189 @@
+import { Option, Result } from "effect"
+import { describe, expect, it } from "vitest"
+import { Parser, Token } from "../src/index.js"
+import { expectFailure, expectSuccess, peek } from "./utils.js"
+
+const partial = <A, E>(p: Parser.Parser<A, E, never, any>, input: any) => {
+  const r = Parser.parsePartial(p, input)
+  return Result.isSuccess(r) ? r.success : { _tag: "Error", offset: r.failure.offset }
+}
+const incomplete = (n?: number) => ({ _tag: "Incomplete", needed: n === undefined ? Option.none() : Option.some(n) })
+const done = (value: unknown, offset: number) => ({ _tag: "Done", value, offset })
+const bytes = (...xs: Array<number>) => new Uint8Array(xs)
+
+describe("Token", () => {
+  describe("any", () => {
+    it("string", () => {
+      expect(peek(Token.any, "abc")).toEqual(Result.succeed(["bc", "a"]))
+      expectFailure(Token.any, "")
+    })
+
+    it("handles astral code points", () => {
+      expect(peek(Token.any, "😀x")).toEqual(Result.succeed(["x", "😀"]))
+    })
+
+    it("bytes and arrays", () => {
+      expectSuccess(Token.anyToken<Uint8Array>(), bytes(7), 7)
+      expectSuccess(Token.anyToken<ReadonlyArray<{ t: string }>>(), [{ t: "x" }], { t: "x" })
+    })
+
+    it("partial", () => {
+      expect(partial(Token.any, "")).toEqual(incomplete(1))
+    })
+  })
+
+  describe("literal", () => {
+    it("string", () => {
+      expect(peek(Token.literal("Hello"), "Hello, World!")).toEqual(Result.succeed([", World!", "Hello"]))
+      expectFailure(Token.literal("Hello"), "Something")
+      expectFailure(Token.literal("Hello"), "")
+    })
+
+    it("partial (winnow partial_literal tests)", () => {
+      expect(partial(Token.literal("Hello"), "Hel")).toEqual(incomplete(2))
+      expect(partial(Token.literal("Hello"), "")).toEqual(incomplete(5))
+      expect(partial(Token.literal("Hello"), "Help")).toEqual({ _tag: "Error", offset: 0 })
+    })
+
+    it("bytes", () => {
+      const p = Token.literal(bytes(1, 2))
+      expect(peek(p, bytes(1, 2, 3))).toEqual(Result.succeed([bytes(3), bytes(1, 2)]))
+      expectFailure(p, bytes(1, 3))
+    })
+
+    it("token arrays", () => {
+      const p = Token.literal(["let", "x"])
+      expectSuccess(p, ["let", "x"], ["let", "x"])
+    })
+
+    it("string literals match byte input as UTF-8", () => {
+      const p = Token.literal("é") as unknown as Parser.Parser<Uint8Array, never, never, Uint8Array>
+      expectSuccess(p, new TextEncoder().encode("é"), new TextEncoder().encode("é"))
+    })
+  })
+
+  describe("oneOf / noneOf", () => {
+    it("character sets", () => {
+      expect(peek(Token.oneOf("abc"), "b")).toEqual(Result.succeed(["", "b"]))
+      expectFailure(Token.oneOf("a"), "bc")
+      expect(peek(Token.noneOf("abc"), "z")).toEqual(Result.succeed(["", "z"]))
+      expectFailure(Token.noneOf("ab"), "a")
+    })
+
+    it("ranges, predicates and unions", () => {
+      const ident = Token.oneOf([Token.range("a", "z"), "_", (c: string) => c === "$"])
+      expectSuccess(ident, "q", "q")
+      expectSuccess(ident, "_", "_")
+      expectSuccess(ident, "$", "$")
+      expectFailure(ident, "Q")
+    })
+
+    it("non-ASCII sets", () => {
+      expectSuccess(Token.oneOf("αβγ😀"), "😀", "😀")
+      expectFailure(Token.oneOf("αβγ"), "δ")
+    })
+
+    it("bytes", () => {
+      const p = Token.oneOf<Uint8Array>([0x01, Token.range(0x30, 0x39), "x"])
+      expectSuccess(p, bytes(0x35), 0x35)
+      expectSuccess(p, bytes(0x78), 0x78)
+      expectFailure(p, bytes(0x02))
+    })
+
+    it("arrays", () => {
+      type Tok = "(" | ")" | "x"
+      const p = Token.oneOf<ReadonlyArray<Tok>>(["(", ")"])
+      expectSuccess(p, ["("], "(")
+      expectFailure(p, ["x"])
+    })
+
+    it("error messages", () => {
+      const err = expectFailure(Token.oneOf("abc"), "z")
+      expect(err.message).toContain("expected one of \"abc\", found \"z\"")
+    })
+  })
+
+  describe("take", () => {
+    it("string (counts code points)", () => {
+      expect(peek(Token.take(3), "😀bcd")).toEqual(Result.succeed(["d", "😀bc"]))
+      expectFailure(Token.take(3), "ab")
+    })
+
+    it("bytes", () => {
+      expect(peek(Token.take<Uint8Array>(2), bytes(1, 2, 3))).toEqual(Result.succeed([bytes(3), bytes(1, 2)]))
+    })
+
+    it("partial", () => {
+      expect(partial(Token.take(4), "ab")).toEqual(incomplete(2))
+    })
+  })
+
+  describe("takeWhile / takeTill", () => {
+    const alpha = Token.range("a", "z")
+
+    it("zero or more", () => {
+      expect(peek(Token.takeWhile(alpha), "abc123")).toEqual(Result.succeed(["123", "abc"]))
+      expect(peek(Token.takeWhile(alpha), "123")).toEqual(Result.succeed(["123", ""]))
+    })
+
+    it("ranges (winnow take_while_m_n tests)", () => {
+      const p = Token.takeWhile(alpha, { min: 3, max: 6 })
+      expect(peek(p, "latin123")).toEqual(Result.succeed(["123", "latin"]))
+      expect(peek(p, "lengthy")).toEqual(Result.succeed(["y", "length"]))
+      expectFailure(p, "ab12")
+      expectFailure(p, "")
+    })
+
+    it("partial (winnow partial take_while tests)", () => {
+      expect(partial(Token.takeWhile(alpha), "abc")).toEqual(incomplete(1))
+      expect(partial(Token.takeWhile(alpha), "abc1")).toEqual(done("abc", 3))
+      expect(partial(Token.takeWhile(alpha, { max: 2 }), "abc")).toEqual(done("ab", 2))
+    })
+
+    it("takeTill", () => {
+      expect(peek(Token.takeTill(":"), "key:value")).toEqual(Result.succeed([":value", "key"]))
+      expectFailure(Token.takeTill(":", { min: 1 }), ":")
+    })
+
+    it("bytes", () => {
+      const p = Token.takeWhile<Uint8Array>((b) => b < 10)
+      expect(peek(p, bytes(1, 2, 30))).toEqual(Result.succeed([bytes(30), bytes(1, 2)]))
+    })
+
+    it("reports the offending position", () => {
+      const err = expectFailure(Token.takeWhile(alpha, { min: 3 }), "ab1")
+      expect(err.offset).toBe(2)
+    })
+  })
+
+  describe("takeUntil", () => {
+    it("string", () => {
+      expect(peek(Token.takeUntil("world"), "Hello world")).toEqual(Result.succeed(["world", "Hello "]))
+      expectFailure(Token.takeUntil("world"), "Hello")
+    })
+
+    it("ranges", () => {
+      expectFailure(Token.takeUntil("x", { min: 1 }), "x")
+      expect(peek(Token.takeUntil("x", { min: 1 }), "xx")).toEqual(Result.succeed(["x", "x"]))
+      expectFailure(Token.takeUntil("x", { max: 2 }), "abcx")
+    })
+
+    it("bytes", () => {
+      const p = Token.takeUntil(bytes(0, 0))
+      expect(peek(p, bytes(1, 0, 2, 0, 0))).toEqual(Result.succeed([bytes(0, 0), bytes(1, 0, 2)]))
+    })
+
+    it("partial", () => {
+      expect(partial(Token.takeUntil("--"), "abc-")).toEqual(incomplete())
+      expect(partial(Token.takeUntil("--"), "abc--")).toEqual(done("abc", 3))
+    })
+  })
+
+  describe("rest", () => {
+    it("rest / restLen", () => {
+      expectSuccess(Parser.preceded(Token.literal("a"), Token.rest), "abc", "bc")
+      expect(peek(Token.restLen, "abc")).toEqual(Result.succeed(["abc", 3]))
+      expectSuccess(Token.restOf<Uint8Array>(), bytes(1, 2), bytes(1, 2))
+    })
+  })
+})
