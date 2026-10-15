@@ -7,17 +7,13 @@ settings:
 importers:
 
   .:
-    dependencies:
-      effect:
-        specifier: 4.0.5
-        version: 4.0.5
     devDependencies:
-      '@effect/vitest':
-        specifier: 4.0.5
-        version: 4.0.5(effect@4.0.5)(vitest@5.0.4(@types/node@26.6.5)(vite@8.3.4(@types/node@26.6.5)))
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
+      effect:
+        specifier: 4.0.5
+        version: 4.0.5
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -26,12 +22,6 @@ importers:
         version: 5.0.4(@types/node@26.6.5)(vite@8.3.4(@types/node@26.6.5))
 
 packages:
-
-  '@effect/vitest@4.0.5':
-    resolution: {integrity: sha512-q64paZ/i4V2NiRhTyqCmT2KiDbFjlxc2EZrZca8GGt+Nf8844946HyJM5bPk/q+YeRkFSxIrlCs+J+LSfky/wA==}
-    peerDependencies:
-      effect: ^4.0.5
-      vitest: '>=5.0.0 <6.0.0'
 
   '@jridgewell/resolve-uri@3.1.2':
     resolution: {integrity: sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==}
@@ -539,11 +529,6 @@ packages:
     hasBin: true
 
 snapshots:
-
-  '@effect/vitest@4.0.5(effect@4.0.5)(vitest@5.0.4(@types/node@26.6.5)(vite@8.3.4(@types/node@26.6.5)))':
-    dependencies:
-      effect: 4.0.5
-      vitest: 5.0.4(@types/node@26.6.5)(vite@8.3.4(@types/node@26.6.5))
 
   '@jridgewell/resolve-uri@3.1.2': {}
 

@@ -124,8 +124,8 @@ const alnumSet = [range("a", "z"), range("A", "Z"), range("0", "9")]
 const spaceSet = " \t"
 const multispaceSet = " \t\r\n"
 
-const cls = (set: unknown, min: 0 | 1, description: string, kind: ErrorKind): Parser<string> =>
-  takeWhileImpl<string>(set, { min }, false, `${kind.toLowerCase()}${min}`, description, kind)
+const cls = (set: unknown, min: 0 | 1, description: string, kind: ErrorKind, hint = true): Parser<string> =>
+  takeWhileImpl<string>(set, { min }, false, `${kind.toLowerCase()}${min}`, description, kind, hint)
 
 // -----------------------------------------------------------------------------
 // Character classes
@@ -217,7 +217,7 @@ export const alphanumeric1: Parser<string> = cls(alnumSet, 1, "letter or digit",
  * @since 0.1.0
  * @category character classes
  */
-export const space0: Parser<string> = cls(spaceSet, 0, "space", "Space")
+export const space0: Parser<string> = cls(spaceSet, 0, "space", "Space", false)
 
 /**
  * One or more spaces and tabs, `[ \t]+`.
@@ -225,7 +225,7 @@ export const space0: Parser<string> = cls(spaceSet, 0, "space", "Space")
  * @since 0.1.0
  * @category character classes
  */
-export const space1: Parser<string> = cls(spaceSet, 1, "space", "Space")
+export const space1: Parser<string> = cls(spaceSet, 1, "space", "Space", false)
 
 /**
  * Zero or more spaces, tabs, carriage returns and line feeds,
@@ -234,7 +234,7 @@ export const space1: Parser<string> = cls(spaceSet, 1, "space", "Space")
  * @since 0.1.0
  * @category character classes
  */
-export const multispace0: Parser<string> = cls(multispaceSet, 0, "whitespace", "MultiSpace")
+export const multispace0: Parser<string> = cls(multispaceSet, 0, "whitespace", "MultiSpace", false)
 
 /**
  * One or more spaces, tabs, carriage returns and line feeds,
@@ -243,7 +243,7 @@ export const multispace0: Parser<string> = cls(multispaceSet, 0, "whitespace", "
  * @since 0.1.0
  * @category character classes
  */
-export const multispace1: Parser<string> = cls(multispaceSet, 1, "whitespace", "MultiSpace")
+export const multispace1: Parser<string> = cls(multispaceSet, 1, "whitespace", "MultiSpace", false)
 
 // -----------------------------------------------------------------------------
 // Line endings

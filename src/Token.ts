@@ -278,7 +278,8 @@ export const takeWhileImpl = <I extends Input>(
   negate: boolean,
   name: string,
   description?: string,
-  kind: ErrorKind = "TakeWhile"
+  kind: ErrorKind = "TakeWhile",
+  hint = false
 ): Parser<Slice<NoInfer<I>>, never, never, NoInfer<I>> => {
   const m = compileAny(set)
   const [min, max] = normalize(r)
@@ -288,6 +289,8 @@ export const takeWhileImpl = <I extends Input>(
     const { count, hitEnd, offset } = scan(state, m, negate, max)
     if (hitEnd && state.partial) return state.incomplete(1, expected)
     if (count < min) return state.backtrack(kind, expected, offset)
+    // More matching tokens would have been accepted where we stopped
+    if (hint && count < max) state.setHint(offset, expected)
     state.pos = offset
     return state.slice(start, offset)
   }, name)

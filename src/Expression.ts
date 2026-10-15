@@ -219,7 +219,7 @@ export const make = <A, E, R, I extends Input, const Ops extends ReadonlyArray<O
       if (i === -2) return Fail
       if (i < 0) {
         const f = postfixFailure === undefined ? failure : failure === undefined ? postfixFailure : mergeFailures(postfixFailure, failure)
-        if (f !== undefined && f.offset === state.pos) state.hint = f
+        if (f !== undefined && f.offset === state.pos) state.setHint(f.offset, f.expected)
         break
       }
       const op = infixes[i]!

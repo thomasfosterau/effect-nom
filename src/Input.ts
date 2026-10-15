@@ -151,12 +151,14 @@ export class State<I extends Input = Input> {
   /** Details of the latest failure. Only meaningful after a step returned {@link Fail}. */
   failure: Failure
   /**
-   * A recoverable failure that occurred without consuming input at the
-   * current offset (for example the last attempt of a `repeat`). Its
+   * The offset of a recoverable failure that occurred without consuming
+   * input (for example the last attempt of a `repeat`). Its
    * expectations are merged into new failures at the same offset, producing
    * messages like `expected digit or ")"`.
    */
-  hint: Failure | undefined = undefined
+  hintOffset = -1
+  /** The expectations of the hint at {@link hintOffset}. */
+  hintExpected: ReadonlyArray<string> = empty
   /**
    * The furthest recoverable failure seen so far, including failures that
    * were later swallowed by backtracking (for example a trailing separator
@@ -301,11 +303,24 @@ export class State<I extends Input = Input> {
     return new Failure(d.offset, d.kind, d.expected, context, d.hasCause, d.cause, d.message, d.needed)
   }
 
+  /**
+   * Records that, at `offset`, any of `expected` could also have been
+   * accepted. Used by parsers that stop without failing, such as `opt`,
+   * `repeat` and `Ascii.digit1`.
+   */
+  setHint(offset: number, expected: ReadonlyArray<string>): void {
+    if (this.hintOffset === offset) {
+      this.hintExpected = mergeExpected(this.hintExpected, expected)
+    } else {
+      this.hintOffset = offset
+      this.hintExpected = expected
+    }
+  }
+
   /** @internal */
   makeFailure(offset: number, kind: ErrorKind, expected: ReadonlyArray<string>): Failure {
-    const hint = this.hint
-    if (hint !== undefined && hint.offset === offset && hint.expected.length > 0) {
-      expected = mergeExpected(hint.expected, expected)
+    if (this.hintOffset === offset && this.hintExpected.length > 0) {
+      expected = mergeExpected(this.hintExpected, expected)
     }
     return new Failure(offset, kind, expected, empty, false, undefined, undefined, 0)
   }

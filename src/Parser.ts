@@ -894,11 +894,12 @@ export const expected: {
   const desc = [description]
   return make((state) => {
     const start = state.pos
-    const hint = state.hint
+    const hintOffset = state.hintOffset
+    const hintExpected = state.hintExpected
     const a = step(state)
     if (a === Fail && state.failure.offset === start) {
       const f = state.failure
-      const expected = hint !== undefined && hint.offset === start ? mergeExpected(hint.expected, desc) : desc
+      const expected = hintOffset === start ? mergeExpected(hintExpected, desc) : desc
       state.replaceFailure(new Failure(f.offset, f.kind, expected, f.context, f.hasCause, f.cause, f.message, f.needed))
     }
     return a
@@ -994,7 +995,11 @@ export const orElseSucceed: {
 /** Rewinds after a recoverable failure, remembering it as a hint. */
 const recover = (state: State<any>, start: number): void => {
   state.pos = start
-  if (state.failure.offset === start) state.hint = state.failure
+  const f = state.failure
+  if (f.offset === start) {
+    state.hintOffset = start
+    state.hintExpected = f.expected
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1068,7 +1073,8 @@ export const not = <A, E, R, I extends Input>(self: Parser<A, E, R, I>): Parser<
   const step = self.step
   return make((state) => {
     const start = state.pos
-    const hint = state.hint
+    const hintOffset = state.hintOffset
+    const hintExpected = state.hintExpected
     const a = step(state)
     if (a !== Fail) {
       state.pos = start
@@ -1076,7 +1082,8 @@ export const not = <A, E, R, I extends Input>(self: Parser<A, E, R, I>): Parser<
     }
     if (state.mode !== "Backtrack") return Fail
     state.pos = start
-    state.hint = hint
+    state.hintOffset = hintOffset
+    state.hintExpected = hintExpected
     return undefined
   }, self.name)
 }
@@ -1494,7 +1501,7 @@ export const alt = <const Ps extends ReadonlyArray<Parser.Any>>(
     for (let i = 0; i < n; i++) {
       const a = steps[i]!(state)
       if (a !== Fail) {
-        if (failure !== undefined && failure.offset === state.pos) state.hint = failure
+        if (failure !== undefined && failure.offset === state.pos) state.setHint(failure.offset, failure.expected)
         return a
       }
       if (state.mode !== "Backtrack") return Fail
