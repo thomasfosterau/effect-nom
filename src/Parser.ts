@@ -1517,8 +1517,9 @@ export const alt = <const Ps extends ReadonlyArray<Parser.Any>>(
  * `match` over the input (winnow's `dispatch!`). If no case matches, the
  * parser backtracks to where it started.
  *
- * Cases are given either as a record keyed by the selector's output, or as a
- * function returning a parser (or `undefined` for no match).
+ * Cases are given either as a record keyed by the selector's output (with
+ * an optional `otherwise` parser for unlisted keys, like winnow's `_ =>`
+ * arm), or as a function returning a parser (or `undefined` for no match).
  *
  * @example
  * ```ts
@@ -1545,18 +1546,30 @@ export const dispatch: {
     selector: Parser<K, E, R, I>,
     cases: (key: K) => P | undefined
   ): Parser<Parser.Success<P>, E | Parser.Error<P>, R | Parser.Services<P>, I & Parser.InputOf<P>>
-  <K extends PropertyKey, E, R, I extends Input, const Cases extends { readonly [key in K]?: Parser.Any }>(
+  <
+    K extends PropertyKey,
+    E,
+    R,
+    I extends Input,
+    const Cases extends { readonly [key in K]?: Parser.Any },
+    Otherwise extends Parser.Any = never
+  >(
     selector: Parser<K, E, R, I>,
-    cases: Cases
+    cases: Cases,
+    otherwise?: Otherwise
   ): Parser<
-    Parser.Success<NonNullable<Cases[keyof Cases]>>,
-    E | Parser.Error<NonNullable<Cases[keyof Cases]>>,
-    R | Parser.Services<NonNullable<Cases[keyof Cases]>>,
-    I & Parser.InputOf<NonNullable<Cases[keyof Cases]>>
+    Parser.Success<NonNullable<Cases[keyof Cases]> | Otherwise>,
+    E | Parser.Error<NonNullable<Cases[keyof Cases]> | Otherwise>,
+    R | Parser.Services<NonNullable<Cases[keyof Cases]> | Otherwise>,
+    I & Parser.InputOf<NonNullable<Cases[keyof Cases]> | Otherwise>
   >
-} = (selector: Parser.Any, cases: ((key: any) => Parser.Any | undefined) | Record<PropertyKey, Parser.Any>) => {
+} = (
+  selector: Parser.Any,
+  cases: ((key: any) => Parser.Any | undefined) | Record<PropertyKey, Parser.Any>,
+  otherwise?: Parser.Any
+) => {
   const choose = typeof cases === "function" ? cases : (key: PropertyKey) =>
-    Object.prototype.hasOwnProperty.call(cases, key) ? cases[key] : undefined
+    Object.prototype.hasOwnProperty.call(cases, key) ? cases[key] : otherwise
   const step = selector.step
   return make((state: State<any>) => {
     const start = state.pos

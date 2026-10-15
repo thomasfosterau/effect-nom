@@ -186,11 +186,11 @@ export const literalImpl = (lit: Input, caseless: boolean): Parser<any, never, n
     : `[${lit.map((t) => JSON.stringify(t)).join(", ")}]`
   const expected = [caseless ? `${description} (case insensitive)` : description]
   // A string literal may also be matched against byte input (as UTF-8)
-  const asBytes = typeof lit === "string" ? new TextEncoder().encode(lit) : undefined
+  let asBytes: Uint8Array | undefined
   const literalKind = typeof lit === "string" ? 0 : lit instanceof Uint8Array ? 1 : 2
   return make((state: State<Input>) => {
     const pos = state.pos
-    const l = asBytes !== undefined && state.inputKind === 1 ? asBytes : lit
+    const l = literalKind === 0 && state.inputKind === 1 ? (asBytes ??= new TextEncoder().encode(lit as string)) : lit
     const len = l.length
     const r = matchLiteral(state, l, caseless)
     if (r === -1) return state.backtrack("Literal", expected)

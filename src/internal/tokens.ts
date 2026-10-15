@@ -145,16 +145,12 @@ export interface AnyMatcher {
 }
 
 export const compileAny = (set: unknown): AnyMatcher => {
-  let forString: Matcher | undefined
-  let forCode: Matcher | undefined
+  const forCode = compile(set, "code")
+  const needsString = typeof set === "function" || Array.isArray(set)
   return {
-    get forString() {
-      return forString ??= compile(set, "string")
-    },
-    get forCode() {
-      return forCode ??= compile(set, "code")
-    },
-    description: describeSet(set)
+    forString: needsString ? compile(set, "string") : forCode,
+    forCode,
+    description: forCode.description
   }
 }
 

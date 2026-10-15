@@ -88,23 +88,24 @@ const object: Parser.Parser<{ readonly [key: string]: Json }> = Parser.preceded(
 )
 
 export const value: Parser.Parser<Json> = lexeme(
-  Parser.dispatch(Parser.peek(Token.any), (c): Parser.Parser<Json> | undefined => {
-    switch (c) {
-      case "n":
-        return literal("null").pipe(Parser.as(null))
-      case "t":
-        return literal("true").pipe(Parser.as(true))
-      case "f":
-        return literal("false").pipe(Parser.as(false))
-      case "\"":
-        return string
-      case "[":
-        return array
-      case "{":
-        return object
-      default:
-        return c === "-" || Ascii.isDigit(c) ? number : undefined
-    }
+  Parser.dispatch(Parser.peek(Token.any), {
+    n: literal("null").pipe(Parser.as(null)),
+    t: literal("true").pipe(Parser.as(true)),
+    f: literal("false").pipe(Parser.as(false)),
+    "\"": string,
+    "[": Parser.suspend(() => array),
+    "{": Parser.suspend(() => object),
+    "-": number,
+    0: number,
+    1: number,
+    2: number,
+    3: number,
+    4: number,
+    5: number,
+    6: number,
+    7: number,
+    8: number,
+    9: number
   }).pipe(Parser.expected("value"))
 )
 

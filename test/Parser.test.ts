@@ -227,6 +227,8 @@ describe("Parser", () => {
       expectSuccess(p, "a", 1)
       expectSuccess(p, "b!", 2)
       expect(expectFailure(p, "c").offset).toBe(0)
+      const withDefault = Parser.dispatch(Token.any, { a: Parser.succeed(1) }, Parser.succeed(0))
+      expectSuccess(withDefault, "z", 0)
       const q = Parser.dispatch(Token.any, (c) => c === "x" ? Parser.succeed("x!") : undefined)
       expectSuccess(q, "x", "x!")
       expectFailure(q, "y")
