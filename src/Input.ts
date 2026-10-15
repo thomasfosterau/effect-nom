@@ -138,10 +138,8 @@ export class State<I extends Input = Input> {
   readonly input: I
   /** The current offset. Advanced by parsers, rewound on backtracking. */
   pos: number
-  /** The bit offset within the current byte, used by `Bits` parsers. */
-  bit = 0
-  /** The end offset (the input's length). */
-  readonly end: number
+  /** The end offset (the input's length; in bits inside `Bits.bits`). */
+  end: number
   /** 0 = string, 1 = Uint8Array, 2 = array. */
   readonly inputKind: 0 | 1 | 2
   /** Whether the input is partial (streaming): running out yields `Incomplete`. */
