@@ -1,5 +1,16 @@
 {
   "extends": "./tsconfig.base.json",
-  "compilerOptions": { "noEmit": true },
-  "include": ["src", "test", "examples"]
+  "compilerOptions": {
+    "noEmit": true,
+    "paths": {
+      "effect-nom": [
+        "./src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "test",
+    "examples"
+  ]
 }

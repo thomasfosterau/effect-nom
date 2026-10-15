@@ -20,7 +20,7 @@
  *
  * @since 0.1.0
  */
-import type { Input, State } from "./Input.js"
+import type { State } from "./Input.js"
 import { Fail, Failure } from "./Input.js"
 import type { Parser } from "./Parser.js"
 import { make } from "./Parser.js"
@@ -38,18 +38,48 @@ export interface BitInput extends ReadonlyArray<never> {
   readonly [BitInputBrand]: true
 }
 
-const toBytes = (state: State<Input>): void => {
-  const f = state.failure
-  state.failure = new Failure(
-    Math.floor(f.offset / 8),
+const scale = (f: Failure, factor: number): Failure =>
+  new Failure(
+    factor < 1 ? Math.floor(f.offset * factor) : f.offset * factor,
     f.kind,
     f.expected,
     f.context,
     f.hasCause,
     f.cause,
     f.message,
-    Math.ceil(f.needed / 8)
+    factor < 1 ? Math.ceil(f.needed * factor) : f.needed * factor
   )
+
+/**
+ * Runs `step` with offsets measured in different units (bits vs bytes),
+ * converting failure offsets back to the outer units afterwards.
+ */
+const inUnits = <A>(state: State<any>, factor: number, step: (state: State<any>) => A | Fail): A | Fail => {
+  const end = state.end
+  const deepest = state.deepest
+  state.deepest = undefined
+  state.pos = factor > 1 ? state.pos * factor : Math.ceil(state.pos * factor)
+  state.end = end * factor
+  const a = step(state)
+  state.end = end
+  const inner = state.deepest
+  state.deepest = deepest
+  if (a === Fail) {
+    state.pos = factor > 1 ? Math.floor(state.pos / factor) : state.pos / factor
+    const f = state.failure
+    state.failure = scale(f, 1 / factor)
+    if (inner !== undefined) {
+      const d = inner === f ? state.failure : scale(inner, 1 / factor)
+      if (deepest === undefined || d.offset >= deepest.offset) state.deepest = d
+    }
+    return Fail
+  }
+  state.pos = factor > 1 ? Math.ceil(state.pos / factor) : state.pos / factor
+  if (inner !== undefined) {
+    const d = scale(inner, 1 / factor)
+    if (deepest === undefined || d.offset >= deepest.offset) state.deepest = d
+  }
+  return a
 }
 
 /**
@@ -60,21 +90,8 @@ const toBytes = (state: State<Input>): void => {
  * @category combinators
  */
 export const bits = <A, E, R>(self: Parser<A, E, R, BitInput>): Parser<A, E, R, Uint8Array> => {
-  const step = self.step as unknown as (state: State<Uint8Array>) => A | Fail
-  return make((state) => {
-    const end = state.end
-    state.pos *= 8
-    state.end = end * 8
-    const a = step(state)
-    state.end = end
-    if (a === Fail) {
-      state.pos = Math.floor(state.pos / 8)
-      toBytes(state)
-      return Fail
-    }
-    state.pos = Math.ceil(state.pos / 8)
-    return a
-  }, "bits")
+  const step = self.step as unknown as (state: State<any>) => A | Fail
+  return make((state) => inUnits(state, 8, step), "bits")
 }
 
 /**
@@ -85,20 +102,8 @@ export const bits = <A, E, R>(self: Parser<A, E, R, BitInput>): Parser<A, E, R, 
  * @category combinators
  */
 export const bytes = <A, E, R>(self: Parser<A, E, R, Uint8Array>): Parser<A, E, R, BitInput> => {
-  const step = self.step
-  return make((state: State<any>) => {
-    const end = state.end
-    state.pos = Math.ceil(state.pos / 8)
-    state.end = end / 8
-    const a = step(state)
-    state.end = end
-    state.pos *= 8
-    if (a === Fail) {
-      const f = state.failure
-      state.failure = new Failure(f.offset * 8, f.kind, f.expected, f.context, f.hasCause, f.cause, f.message, f.needed * 8)
-    }
-    return a
-  }, "bytes")
+  const step = self.step as (state: State<any>) => A | Fail
+  return make((state: State<any>) => inUnits(state, 1 / 8, step), "bytes")
 }
 
 const readBits = (state: State<any>, count: number): number => {

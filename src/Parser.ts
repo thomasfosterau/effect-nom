@@ -652,9 +652,9 @@ export const filterMap: {
  */
 export const filter: {
   <A, B extends A>(
-    refinement: (a: A) => a is B
+    refinement: (a: NoInfer<A>) => a is B
   ): <E, R, I extends Input>(self: Parser<A, E, R, I>) => Parser<B, E, R, I>
-  <A>(predicate: (a: A) => boolean): <E, R, I extends Input>(self: Parser<A, E, R, I>) => Parser<A, E, R, I>
+  <A>(predicate: (a: NoInfer<A>) => boolean): <E, R, I extends Input>(self: Parser<A, E, R, I>) => Parser<A, E, R, I>
   <A, E, R, I extends Input, B extends A>(self: Parser<A, E, R, I>, refinement: (a: A) => a is B): Parser<B, E, R, I>
   <A, E, R, I extends Input>(self: Parser<A, E, R, I>, predicate: (a: A) => boolean): Parser<A, E, R, I>
 } = dual(2, <A, E, R, I extends Input>(self: Parser<A, E, R, I>, predicate: (a: A) => boolean) => {
@@ -678,12 +678,12 @@ export const filter: {
  */
 export const filterOrFail: {
   <A, B extends A, E2>(
-    refinement: (a: A) => a is B,
-    orFailWith: (a: A) => E2
+    refinement: (a: NoInfer<A>) => a is B,
+    orFailWith: (a: NoInfer<A>) => E2
   ): <E, R, I extends Input>(self: Parser<A, E, R, I>) => Parser<B, E | E2, R, I>
   <A, E2>(
-    predicate: (a: A) => boolean,
-    orFailWith: (a: A) => E2
+    predicate: (a: NoInfer<A>) => boolean,
+    orFailWith: (a: NoInfer<A>) => E2
   ): <E, R, I extends Input>(self: Parser<A, E, R, I>) => Parser<A, E | E2, R, I>
   <A, E, R, I extends Input, B extends A, E2>(
     self: Parser<A, E, R, I>,
@@ -862,7 +862,7 @@ export const context: {
     const a = step(state)
     if (a === Fail && state.mode !== "Incomplete") {
       const f = state.failure
-      state.failure = new Failure(
+      state.replaceFailure(new Failure(
         f.offset,
         f.kind,
         f.expected,
@@ -871,7 +871,7 @@ export const context: {
         f.cause,
         f.message,
         f.needed
-      )
+      ))
     }
     return a
   }, self.name ?? label)
@@ -899,7 +899,7 @@ export const expected: {
     if (a === Fail && state.failure.offset === start) {
       const f = state.failure
       const expected = hint !== undefined && hint.offset === start ? mergeExpected(hint.expected, desc) : desc
-      state.failure = new Failure(f.offset, f.kind, expected, f.context, f.hasCause, f.cause, f.message, f.needed)
+      state.replaceFailure(new Failure(f.offset, f.kind, expected, f.context, f.hasCause, f.cause, f.message, f.needed))
     }
     return a
   }, description)
@@ -920,7 +920,7 @@ export const mapError: {
     const a = step(state)
     if (a === Fail && state.failure.hasCause) {
       const x = state.failure
-      state.failure = new Failure(x.offset, x.kind, x.expected, x.context, true, f(x.cause as E), x.message, x.needed)
+      state.replaceFailure(new Failure(x.offset, x.kind, x.expected, x.context, true, f(x.cause as E), x.message, x.needed))
     }
     return a
   }, self.name)
@@ -943,7 +943,7 @@ export const orFail: {
     const a = step(state)
     if (a === Fail && state.mode !== "Incomplete") {
       const x = state.failure
-      state.failure = new Failure(start, x.kind, [], x.context, true, error(), undefined, 0)
+      state.replaceFailure(new Failure(start, x.kind, [], x.context, true, error(), undefined, 0))
     }
     return a
   }, self.name)
@@ -1501,8 +1501,7 @@ export const alt = <const Ps extends ReadonlyArray<Parser.Any>>(
       failure = failure === undefined ? state.failure : mergeFailures(failure, state.failure)
       state.pos = start
     }
-    state.failure = failure!
-    return Fail
+    return state.failWith("Backtrack", failure!)
   }, "alt")
 }
 
@@ -1605,10 +1604,7 @@ export const permutation = <const Ps extends ReadonlyArray<Parser.Any>>(
         failure = failure === undefined ? state.failure : mergeFailures(failure, state.failure)
         state.pos = start
       }
-      if (!matched) {
-        state.failure = failure!
-        return Fail
-      }
+      if (!matched) return state.failWith("Backtrack", failure!)
     }
     return out as any
   }, "permutation")
@@ -1763,7 +1759,7 @@ export const repeatTill: {
       const a = step(state)
       if (a === Fail) {
         if (endFailure !== undefined && state.mode === "Backtrack") {
-          state.failure = mergeFailures(endFailure, state.failure)
+          state.failWith("Backtrack", mergeFailures(endFailure, state.failure))
         }
         return Fail
       }
@@ -2228,7 +2224,7 @@ const makeState = <I extends Input>(
 }
 
 const toError = <E>(state: State<any>): ParseError.ParseError<E> =>
-  ParseError.fromFailure<E>(state.input, state.failure, state.mode)
+  ParseError.fromFailure<E>(state.input, state.reportedFailure(), state.mode)
 
 const runComplete = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,

@@ -134,7 +134,7 @@ export const parseMany: {
         const a = step(state)
         if (a === Fail) {
           if (partial && state.mode === "Incomplete") break
-          return Effect.fail(ParseError.fromFailure<E>(input, state.failure, state.mode))
+          return Effect.fail(ParseError.fromFailure<E>(input, state.reportedFailure(), state.mode))
         }
         if (state.pos === offset) return Effect.fail(noProgress(input, offset))
         out.push(a)
@@ -189,10 +189,10 @@ export const parseAll: {
           const all = join(chunks, options?.empty)
           const state = new State(all, { context })
           const a = parser.step(state)
-          if (a === Fail) return Effect.fail(ParseError.fromFailure<E>(all, state.failure, state.mode))
+          if (a === Fail) return Effect.fail(ParseError.fromFailure<E>(all, state.reportedFailure(), state.mode))
           if (state.pos < state.end) {
             state.backtrack("Eof", ["end of input"])
-            return Effect.fail(ParseError.fromFailure<E>(all, state.failure, state.mode))
+            return Effect.fail(ParseError.fromFailure<E>(all, state.reportedFailure(), state.mode))
           }
           return Effect.succeed(a)
         }))

@@ -157,6 +157,14 @@ export class State<I extends Input = Input> {
    * messages like `expected digit or ")"`.
    */
   hint: Failure | undefined = undefined
+  /**
+   * The furthest recoverable failure seen so far, including failures that
+   * were later swallowed by backtracking (for example a trailing separator
+   * followed by an invalid element). It is reported instead of the final
+   * failure when it lies further into the input. This is the classic PEG
+   * "farthest failure" heuristic.
+   */
+  deepest: Failure | undefined = undefined
   /** When defined, `Parser.resumeAfter`/`retryAfter` record failures here. */
   recovered: Array<Failure> | undefined = undefined
   /** When defined, `Parser.trace` reports events here. */
@@ -260,7 +268,37 @@ export class State<I extends Input = Input> {
   failWith(mode: ErrMode, failure: Failure): Fail {
     this.mode = mode
     this.failure = failure
+    if (mode === "Backtrack" && (this.deepest === undefined || failure.offset >= this.deepest.offset)) {
+      this.deepest = failure
+    }
     return Fail
+  }
+
+  /**
+   * Replaces the details of the current failure (for example to add context),
+   * keeping the record of the furthest failure consistent.
+   */
+  replaceFailure(failure: Failure): void {
+    if (this.deepest === this.failure) this.deepest = failure
+    this.failure = failure
+  }
+
+  /**
+   * The failure to report to the user: the current failure, or the furthest
+   * failure if it lies beyond the current one and the current failure is a
+   * plain syntax error (no user cause or message).
+   */
+  reportedFailure(): Failure {
+    const f = this.failure
+    const d = this.deepest
+    if (
+      d === undefined || d === f || d.offset <= f.offset || this.mode === "Incomplete" ||
+      f.hasCause || f.message !== undefined
+    ) {
+      return f
+    }
+    const context = d.context.length === 0 ? f.context : [...d.context, ...f.context.filter((l) => !d.context.includes(l))]
+    return new Failure(d.offset, d.kind, d.expected, context, d.hasCause, d.cause, d.message, d.needed)
   }
 
   /** @internal */

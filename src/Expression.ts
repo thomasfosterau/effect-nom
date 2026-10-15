@@ -194,7 +194,7 @@ export const make = <A, E, R, I extends Input, const Ops extends ReadonlyArray<O
       lhs = operand(state)
       if (lhs === Fail) {
         if (prefixFailure !== undefined && state.mode === "Backtrack") {
-          state.failure = mergeFailures(prefixFailure, state.failure)
+          state.failWith("Backtrack", mergeFailures(prefixFailure, state.failure))
         }
         return Fail
       }
