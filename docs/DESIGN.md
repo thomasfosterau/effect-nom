@@ -170,3 +170,23 @@ expected value
    `ParserSchema`.
 7. `Nom` aliases. Worked examples ported from winnow's topics (JSON,
    arithmetic, INI, HTTP, s-expressions) as tests. README.
+
+## 5. Deliberate differences from nom and winnow
+
+- **`eof` on partial input** returns `Incomplete`. More data might still
+  arrive, so end of input can't be confirmed yet. `ParserStream` makes a
+  final pass in complete mode, which settles it.
+- **Error reporting** uses three heuristics that nom and winnow don't have:
+  merging expectations in `alt`, *hints* from parsers that stopped without
+  failing, and *furthest failure*. The furthest heuristic may report a
+  deeper failure from an abandoned branch instead of a shallower final one.
+  It never overrides a failure that carries a user `cause` or message.
+- **`resumeAfter` / `retryAfter`** run the recovery parser from the position
+  where the failing parser *started*, not from where it failed.
+- **`ParserStream.parseMany` error offsets** are relative to the buffer of
+  input not yet consumed. That buffer is also the `input` of the
+  `ParseError`.
+- **The progress check** (a parser that succeeds without consuming input is
+  rejected) applies only to unbounded repetitions. Bounded ones simply end.
+- **Strings are parsed by code point.** A surrogate pair split across two
+  partial chunks is reported as `Incomplete`.

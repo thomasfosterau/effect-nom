@@ -164,7 +164,8 @@ describe("Token", () => {
 
     it("ranges", () => {
       expectFailure(Token.takeUntil("x", { min: 1 }), "x")
-      expect(peek(Token.takeUntil("x", { min: 1 }), "xx")).toEqual(Result.succeed(["x", "x"]))
+      expect(Result.isFailure(Parser.parsePeek(Token.takeUntil("x", { min: 1 }), "xx"))).toBe(true)
+      expect(peek(Token.takeUntil("x", { min: 1 }), "ax")).toEqual(Result.succeed(["x", "a"]))
       expectFailure(Token.takeUntil("x", { max: 2 }), "abcx")
     })
 

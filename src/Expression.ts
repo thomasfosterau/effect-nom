@@ -163,11 +163,16 @@ export const make = <A, E, R, I extends Input, const Ops extends ReadonlyArray<O
   // failure. Expectations of failed attempts are accumulated in `failure`.
   let matched: unknown
   let failure: Failure | undefined
-  const tryOps = (state: State<any>, ops: ReadonlyArray<OperatorBase<any, any, any>>): number => {
+  const tryOps = (state: State<any>, ops: ReadonlyArray<OperatorBase<any, any, any>>, mustConsume: boolean): number => {
     const start = state.pos
     for (let i = 0; i < ops.length; i++) {
       const out = ops[i]!.parser.step(state)
       if (out !== Fail) {
+        // A prefix or postfix operator matching nothing would apply forever
+        if (mustConsume && state.pos === start) {
+          state.failMessage("Cut", "Assert", "prefix and postfix operators must always consume")
+          return -2
+        }
         matched = out
         return i
       }
@@ -181,7 +186,7 @@ export const make = <A, E, R, I extends Input, const Ops extends ReadonlyArray<O
   const expr = (state: State<any>, minPower: number): A | Fail => {
     let lhs: A | Fail
     failure = undefined
-    const p = tryOps(state, prefixes)
+    const p = tryOps(state, prefixes, true)
     if (p === -2) return Fail
     if (p >= 0) {
       const op = prefixes[p]!
@@ -203,7 +208,7 @@ export const make = <A, E, R, I extends Input, const Ops extends ReadonlyArray<O
     while (true) {
       const start = state.pos
       failure = undefined
-      const q = tryOps(state, postfixes)
+      const q = tryOps(state, postfixes, true)
       if (q === -2) return Fail
       if (q >= 0) {
         const op = postfixes[q]!
@@ -215,7 +220,7 @@ export const make = <A, E, R, I extends Input, const Ops extends ReadonlyArray<O
         continue
       }
       const postfixFailure = failure
-      const i = tryOps(state, infixes)
+      const i = tryOps(state, infixes, false)
       if (i === -2) return Fail
       if (i < 0) {
         const f = postfixFailure === undefined ? failure : failure === undefined ? postfixFailure : mergeFailures(postfixFailure, failure)

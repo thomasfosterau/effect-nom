@@ -31,7 +31,8 @@ import {
   matchLiteral,
   nextIf,
   NoMatch,
-  scan
+  scan,
+  splitSurrogate
 } from "./internal/tokens.js"
 import type { ErrorKind } from "./ParseError.js"
 import type { Parser, Range } from "./Parser.js"
@@ -113,6 +114,7 @@ const anyStep = (state: State<Input>): unknown => {
   switch (state.inputKind) {
     case 0: {
       const s = state.input as string
+      if (splitSurrogate(state, pos)) return state.incomplete(1, expectedAny)
       const c = s.charCodeAt(pos)
       if (c >= 0xd800 && c <= 0xdbff && pos + 1 < s.length && (s.charCodeAt(pos + 1) & 0xfc00) === 0xdc00) {
         state.pos = pos + 2
@@ -354,14 +356,16 @@ export const takeUntil: {
   const expected = [description]
   return make((state: State<Input>) => {
     const start = state.pos
-    const from = min === 0 ? start : advance(state, start, min).offset
-    const idx = indexOf(state, lit, from)
+    const idx = indexOf(state, lit, start)
     if (idx < 0) {
       if (state.partial) return state.incomplete(0, expected)
       return state.backtrack("TakeUntil", expected, state.end)
     }
-    if (max !== Infinity && countTokens(state, start, idx) > max) {
-      return state.backtrack("TakeUntil", expected)
+    // As in winnow, the first occurrence must lie within the range
+    if (min > 0 || max !== Infinity) {
+      const count = countTokens(state, start, idx)
+      if (count < min) return state.backtrack("TakeUntil", expected, idx)
+      if (count > max) return state.backtrack("TakeUntil", expected)
     }
     state.pos = idx
     return state.slice(start, idx)

@@ -154,6 +154,17 @@ export const compileAny = (set: unknown): AnyMatcher => {
   }
 }
 
+/**
+ * Whether the string token at `i` is a high surrogate at the very end of a
+ * partial input, i.e. the first half of a code point whose second half has
+ * not arrived yet.
+ */
+export const splitSurrogate = (state: State<Input>, i: number): boolean => {
+  if (!state.partial || i !== state.end - 1) return false
+  const c = (state.input as string).charCodeAt(i)
+  return c >= 0xd800 && c <= 0xdbff
+}
+
 /** Reads the code point at `i` of a string. */
 export const codePointAt = (s: string, i: number): number => {
   const c = s.charCodeAt(i)
@@ -181,6 +192,7 @@ export const nextIf = (
   switch (state.inputKind) {
     case 0: {
       const s = state.input as string
+      if (splitSurrogate(state, pos)) return End
       const cp = codePointAt(s, pos)
       if (m.forString.code(cp) === negate) return NoMatch
       const len = cp > 0xffff ? 2 : 1
@@ -227,6 +239,7 @@ export const scan = (
           if (test(c) === negate) break
           i++
         } else {
+          if (splitSurrogate(state, i)) return { offset: i, count, hitEnd: true }
           const cp = codePointAt(s, i)
           if (test(cp) === negate) break
           i += cp > 0xffff ? 2 : 1
@@ -270,6 +283,7 @@ export const advance = (state: State<Input>, start: number, n: number): { offset
   let i = start
   let count = 0
   while (count < n && i < state.end) {
+    if (splitSurrogate(state, i)) break
     const c = s.charCodeAt(i)
     i += c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1
     count++

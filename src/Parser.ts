@@ -231,6 +231,7 @@ export const isParser = (u: unknown): u is Parser<unknown, unknown, unknown, nev
   typeof u === "object" && u !== null && TypeId in u
 
 const isParserArg = (args: IArguments) => isParser(args[0])
+const isTwoParserArgs = (args: IArguments) => isParser(args[0]) && isParser(args[1])
 
 // -----------------------------------------------------------------------------
 // Constructors
@@ -554,7 +555,9 @@ export const mapParser: {
     const b = inner.step(sub)
     if (b === Fail) {
       const f = sub.failure
-      const offset = Math.min(start + f.offset, state.pos)
+      // The inner input is usually a slice ending where the outer parser stopped
+      const base = Math.max(start, state.pos - a.length)
+      const offset = Math.min(base + f.offset, state.pos)
       return state.failWith(
         sub.mode === "Incomplete" ? "Backtrack" : sub.mode,
         new Failure(offset, f.kind, f.expected, f.context, f.hasCause, f.cause, f.message, 0)
@@ -1056,8 +1059,14 @@ export const peek = <A, E, R, I extends Input>(self: Parser<A, E, R, I>): Parser
   const step = self.step
   return make((state) => {
     const start = state.pos
+    const hintOffset = state.hintOffset
+    const hintExpected = state.hintExpected
     const a = step(state)
-    if (a !== Fail) state.pos = start
+    if (a !== Fail) {
+      state.pos = start
+      state.hintOffset = hintOffset
+      state.hintExpected = hintExpected
+    }
     return a
   }, self.name)
 }
@@ -1755,7 +1764,7 @@ export const repeatTill: {
     end: Parser<B, E2, R2, I2>,
     range?: Rg
   ): Parser<[Repeated<A, Rg>, B], E | E2, R | R2, I & I2>
-} = dual(isParserArg, <A, E, R, I extends Input, B, E2, R2, I2 extends Input>(
+} = dual(isTwoParserArgs, <A, E, R, I extends Input, B, E2, R2, I2 extends Input>(
   self: Parser<A, E, R, I>,
   end: Parser<B, E2, R2, I2>,
   range?: Range
@@ -1815,7 +1824,7 @@ export const separated: {
     separator: Parser<S, E2, R2, I2>,
     range?: Rg
   ): Parser<Repeated<A, Rg>, E | E2, R | R2, I & I2>
-} = dual(isParserArg, <A, E, R, I extends Input, S, E2, R2, I2 extends Input>(
+} = dual(isTwoParserArgs, <A, E, R, I extends Input, S, E2, R2, I2 extends Input>(
   self: Parser<A, E, R, I>,
   separator: Parser<S, E2, R2, I2>,
   range?: Range

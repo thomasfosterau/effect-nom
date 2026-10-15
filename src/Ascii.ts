@@ -302,7 +302,7 @@ export const tillLineEnding: Parser<string> = P.make<string>((state: State<any>)
     if (c === 13) {
       if (i + 1 >= state.end) {
         if (state.partial) return state.incomplete(1, expectedLineEnding)
-        break
+        return state.backtrack("LineEnding", expectedLineEnding, i)
       }
       const d = isString ? (input as string).charCodeAt(i + 1) : (input as Uint8Array)[i + 1]
       if (d === 10) break
@@ -320,7 +320,9 @@ export const tillLineEnding: Parser<string> = P.make<string>((state: State<any>)
 // -----------------------------------------------------------------------------
 
 const toText = (s: Input): string =>
-  typeof s === "string" ? s : s instanceof Uint8Array ? String.fromCharCode(...s) : s.join("")
+  typeof s === "string" ? s : s instanceof Uint8Array ? latin1.decode(s) : s.join("")
+
+const latin1 = new TextDecoder("latin1")
 
 const overflow = (value: number): Result.Result<number, string> =>
   Number.isSafeInteger(value) ? Result.succeed(value) : Result.fail("integer overflow")
