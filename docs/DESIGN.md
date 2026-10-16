@@ -529,9 +529,9 @@ an `indexOf` for the closing quote (an upper bound, not a correct parser)
 runs the ASCII strings document at 1.1×. A correct version also has to
 find backslashes, control characters and, for predicates, non-Latin-1
 characters; with cached searches it ran that document 1.8× faster, but
-documents of short strings 5–7% slower, so the compilers don't do it. On bytes, every
-string longer than 24 bytes costs a `TextDecoder` call, which has a fixed
-cost of about 100 ns. Records and nesting are dominated by the grammar's
+documents of short strings 5–7% slower, so the compilers don't do it. On
+bytes, every string longer than 24 bytes costs a `TextDecoder` call, which
+has a fixed cost of about 100 ns. Records and nesting are dominated by the grammar's
 `Object.fromEntries` (below).
 
 The JIT's remaining gap to the hand-fused parser is mostly the grammar

@@ -215,8 +215,9 @@ export const json = Parser.compile(Parser.preceded(ws, value))
 Parser.parse(json, text) // same Result as before, about 5 times faster
 ```
 
-On the JSON example, compiled parsing runs at 4.6–5.3 times the speed of
-the interpreter, for strings, UTF-8 and UTF-16 alike (see
+On the JSON example, compiled parsing runs at 5–6 times the speed of the
+interpreter, for strings, UTF-8 and UTF-16 alike, and at 1–4 times the
+time of `JSON.parse` depending on the document (see
 [the design notes](docs/DESIGN.md#results)).
 
 `compile` returns the same parser. The code is built on the first run, for
