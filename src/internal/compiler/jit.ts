@@ -19,12 +19,14 @@ import type { Encoding } from "../../Encoding.js"
 import type { State } from "../../Input.js"
 import { Fail } from "../../Input.js"
 import type { Node, NodeOf, ParserLike } from "../node.js"
+import { addEntry, flushEntries, fromEntries, isPlainKey } from "../entries.js"
 import { children, nodeOf } from "../node.js"
 import { floatScan, floatTexts, scanFloatBytes, scanFloatString, toFloat } from "../numbers.js"
 import * as Resume from "../resume.js"
 import { charOf, fastLimit, latin1, string, utf16be, utf16le, utf8, validate } from "../text.js"
 import type { ClosureCompiler, Fallback, Step } from "./closure.js"
 import { createClosureCompiler } from "./closure.js"
+import { entriesShape, pairOf } from "./entries.js"
 import type { First } from "./first.js"
 import { planAlt, Strict } from "./first.js"
 import type { CharSet } from "./sets.js"
@@ -43,6 +45,9 @@ const runtime = {
   charOf,
   scanFloatString,
   scanFloatBytes,
+  isPlainKey,
+  addEntry,
+  flushEntries,
   /** `Text.taken`: the text of `[start, end)`, or `Fail` if it is malformed. */
   textOf: (enc: Encoding<any>, fast: number, s: State<any>, start: number, end: number): unknown => {
     const input = s.input
@@ -176,6 +181,17 @@ const tableTest = (table: Uint8Array, v: string, size: number): string | undefin
       a === b ? `${v}!==${a}` : a === 0 ? `${v}>${b}` : b === size - 1 ? `${v}<${a}` : `(${v}<${a}||${v}>${b})`
     ).join("&&")
   return `(${terms})`
+}
+
+/**
+ * A repetition that builds its own result (see `Emitter.entries`): `init`
+ * starts it, `element(fail, check)` parses one element, runs `check` (the
+ * repetition's loop check) and adds the element, and `finish` ends it.
+ */
+interface Collect {
+  readonly init: string
+  readonly element: (fail: string, check: string) => string
+  readonly finish: string
 }
 
 class Emitter {
@@ -386,6 +402,10 @@ class Emitter {
         if (node.f === toFloat && out !== null) {
           const code = this.float(node, out, fail, fn, d)
           if (code !== undefined) return code
+        }
+        // Streaming builds keep the array, which their checkpoints hold
+        if (node.f === fromEntries && out !== null && !this.resumable && entriesShape(node.self)) {
+          return this.entries(node.self, out, fail, fn, d)
         }
         const t = this.v(fn)
         return this.gen(node.self, true, t, fail, fn, d) + set(`${this.const(node.f)}(${t})`)
@@ -641,17 +661,25 @@ class Emitter {
     return code
   }
 
-  repeat(node: NodeOf<"Repeat"> | NodeOf<"Fold">, used: boolean, out: string | null, fail: string, fn: Fn, d: number): string {
+  repeat(
+    node: NodeOf<"Repeat"> | NodeOf<"Fold">,
+    used: boolean,
+    out: string | null,
+    fail: string,
+    fn: Fn,
+    d: number,
+    collect?: Collect
+  ): string {
     const { max, min } = node
     const loop = this.label()
     const bad = this.label()
     const n = this.v(fn)
     const st = this.v(fn)
     const isFold = node._tag === "Fold"
-    const keep = out !== null && used
+    const keep = out !== null && used && collect === undefined
     const x = keep ? this.v(fn) : null
     const acc = keep ? out! : this.v(fn)
-    let init = ""
+    let init = collect?.init ?? ""
     let add = ""
     if (keep) {
       if (isFold) {
@@ -668,10 +696,14 @@ class Emitter {
     const save = r === undefined
       ? ""
       : `if($S.mode==="Incomplete"&&$S.resume!==void 0)R.save($S,${r.key},${r.entry},{acc:${acc},count:${n},pos:${st}});`
+    // With `collect` (never in resumable builds), the element adds itself once the loop check passed
+    const element = collect === undefined
+      ? `${this.gen(node.self, keep, x, `break ${bad};`, fn, d)}${check}${add}`
+      : collect.element(`break ${bad};`, check)
     const body = `${loop}:for(;${bound};${n}++){${st}=p;` +
-      `${bad}:{${this.gen(node.self, keep, x, `break ${bad};`, fn, d)}${check}${add}continue ${loop};}` +
+      `${bad}:{${element}continue ${loop};}` +
       `${save}if($S.mode!=="Backtrack"${min > 0 ? `||${n}<${min}` : ""}){${fail}}p=${st};break ${loop};}`
-    if (r === undefined) return `${init}${n}=0;${body}`
+    if (r === undefined) return `${init}${n}=0;${body}${collect?.finish ?? ""}`
     return r.wrap(acc, `${acc}=cp.acc;${n}=cp.count;p=cp.pos;`, `${init}${n}=0;`, body)
   }
 
@@ -697,10 +729,18 @@ class Emitter {
     }
   }
 
-  separated(node: NodeOf<"Separated">, used: boolean, out: string | null, fail: string, fn: Fn, d: number): string {
+  separated(
+    node: NodeOf<"Separated">,
+    used: boolean,
+    out: string | null,
+    fail: string,
+    fn: Fn,
+    d: number,
+    collect?: Collect
+  ): string {
     const { max, min } = node
-    const keep = out !== null && used
-    if (max === 0) return keep ? `${out}=[];` : ""
+    const keep = out !== null && used && collect === undefined
+    if (max === 0) return collect !== undefined ? collect.init + collect.finish : keep ? `${out}=[];` : ""
     const x = keep ? this.v(fn) : null
     const acc = keep ? out! : this.v(fn)
     const n = this.v(fn)
@@ -719,17 +759,64 @@ class Emitter {
       return `${ok}:{${bad}:{${body(`break ${bad};`)}${success}break ${ok};}` +
         `${checkpoint}if($S.mode!=="Backtrack"${fatal}){${fail}}p=${st};break ${done};}`
     }
-    const self = (f: string) => this.gen(node.self, keep, x, f, fn, d)
+    const self = (f: string) => collect === undefined ? this.gen(node.self, keep, x, f, fn, d) : collect.element(f, "")
     const sep = (f: string) => this.gen(node.separator, false, null, f, fn, d)
     const check = max === Infinity ? `if(p===${st}){$S.mode="Cut";${fail}}` : ""
-    const first = `${keep ? `${acc}=[];` : ""}${n}=0;${st}=p;` + attempt(self, `${push}${n}++;`, min > 0 ? "||true" : "", "")
+    const first = `${collect?.init ?? (keep ? `${acc}=[];` : "")}${n}=0;${st}=p;` + attempt(self, `${push}${n}++;`, min > 0 ? "||true" : "", "")
     const rest = `${loop}:while(${max === Infinity ? "true" : `${n}<${max}`}){${st}=p;` +
       attempt(sep, "", `||${n}<${min}`, save) + check +
       attempt(self, `${push}${n}++;continue ${loop};`, `||${n}<${min}`, save) +
       `}`
-    if (r === undefined) return `${done}:{${first}${rest}}`
+    if (r === undefined) return `${done}:{${first}${rest}}${collect?.finish ?? ""}`
     // `done` ends the repetition; the checkpoint wrapper records the result after it
     return r.wrap(acc, `${acc}=cp.acc;${n}=cp.count;p=cp.pos;`, "", `${done}:{if(!${r.resumed}){${first}}${rest}}`)
+  }
+
+  /**
+   * `map(self, Object.fromEntries)`, where `entriesShape(self)`: builds the
+   * object directly, assigning each entry as it is parsed (see
+   * `internal/entries.ts`), without the pairs and their array. `cut`,
+   * `preceded`, `terminated` and diagnostics around the repetition are
+   * compiled as usual around it.
+   */
+  private entries(p: ParserLike, out: string, fail: string, fn: Fn, d: number): string {
+    const node = nodeOf(p)
+    switch (node._tag) {
+      case "Mode": {
+        const ok = this.label()
+        const bad = this.label()
+        return `${ok}:{${bad}:{${this.entries(node.self, out, `break ${bad};`, fn, d)}break ${ok};}` +
+          `if($S.mode===${JSON.stringify(node.from)})$S.mode=${JSON.stringify(node.to)};${fail}}`
+      }
+      case "Seq": {
+        const i = node.output as number
+        return node.parsers.map((q, j) =>
+          j === i ? this.entries(q, out, fail, fn, d) : this.gen(q, false, null, fail, fn, d)
+        ).join("")
+      }
+      case "Repeat":
+      case "Separated": {
+        const pair = pairOf(node.self)!
+        const deferred = this.v(fn)
+        const key = this.v(fn)
+        const value = this.v(fn)
+        const collect: Collect = {
+          init: `${out}={};${deferred}=void 0;`,
+          element: (f, check) =>
+            pair.parsers.map((q, j) =>
+              this.gen(q, j === pair.key || j === pair.value, j === pair.key ? key : j === pair.value ? value : null, f, fn, d)
+            ).join("") + check +
+            `if(${deferred}===void 0&&R.isPlainKey(${key}))${out}[${key}]=${value};` +
+            `else ${deferred}=R.addEntry(${out},${deferred},${key},${value});`,
+          finish: `if(${deferred}!==void 0)R.flushEntries(${out},${deferred});`
+        }
+        return node._tag === "Repeat"
+          ? this.repeat(node, true, out, fail, fn, d, collect)
+          : this.separated(node, true, out, fail, fn, d, collect)
+      }
+      default:
+        return this.entries((node as { readonly self: ParserLike }).self, out, fail, fn, d)
+    }
   }
 
   // ---------------------------------------------------------------------------

@@ -439,7 +439,21 @@ and token-set predicates may be cached per character.
    error bound (2^-96, relative) round to it; anything else with `Number`
    on the text. The value is always `Number`'s. `nan`, `inf` and failures
    before a digit run the compiled parser.
-6. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
+6. **Objects.** `map(p, Object.fromEntries)` (which `Parser.fromEntries`
+   is) builds its object directly when `p` is a `repeat` or `separated` of
+   a pair (`separatedPair`, a two-element `seq`), possibly inside `cut`,
+   diagnostics and the kept element of `preceded`, `terminated` or
+   `delimited`: each entry is assigned as it is parsed, with no pairs and
+   no array. `o[key] = value` creates the same property as
+   `Object.fromEntries` when the key is a string that `Object.prototype`
+   has no property for (no `__proto__` setter, no read-only property under
+   a frozen prototype); other keys are defined with
+   `Object.defineProperty`, and from the first object key on (whose
+   conversion may run code) entries are deferred to the end, in order, as
+   `Object.fromEntries` converts them after the whole list is parsed
+   (`internal/entries.ts`). Streaming (resumable) builds keep the array,
+   which their checkpoints hold.
+7. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
    elements of `preceded`/`terminated`/`delimited`/`separatedPair`, `as`,
    `asVoid` and `opt` in void position compile without building their
    values. `Seq` and `Struct` build their results directly.
@@ -502,6 +516,8 @@ runs):
 | `json-text.ts`, `Text.string` | 42.0 ms | 18.6 ms (2.3×) | 7.4 ms (5.7×) |
 | `json-text.ts`, `Text.utf8` | 46.8 ms | 19.2 ms (2.4×) | 7.7 ms (6.1×) |
 | `json-text.ts`, `Text.utf16le` | 54.9 ms | 40.2 ms (1.4×) | 9.7 ms (5.6×) |
+| `json-fast.ts`, `Text.string` | 43.3 ms | 14.6 ms (3.0×) | 4.9 ms (8.8×) |
+| `json-fast.ts`, `Text.utf8` | 47.4 ms | 16.4 ms (2.9×) | 5.3 ms (8.9×) |
 | hand-fused (`bench/json-fused.ts`) | | | 4.6 ms |
 | `JSON.parse` | | | 1.9 ms |
 
@@ -509,15 +525,15 @@ Against `JSON.parse` on documents of different shapes (`pnpm bench:native`;
 bytes are compared with `TextDecoder` then `JSON.parse`), the compiled
 parsers take:
 
-| Document | `json.ts`, string | `Text.string` | `Text.utf8`, bytes |
-|---|---|---|---|
-| records, 1 KB | 4.0× | 3.7× | 2.9× |
-| records, 600 KB, pretty-printed | 4.1× | 4.0× | 2.2× |
-| records, 4 MB | 3.9× | 3.9× | 3.3× |
-| numbers, 1 MB | 1.2× | 1.2× | 1.0× |
-| ASCII strings, 1 MB | 2.9× | 3.1× | 3.1× |
-| escaped strings, 1 MB | 4.8× | 5.7× | 4.1× |
-| deep nesting, 100 KB | 2.1× | 2.2× | 1.8× |
+| Document | `json.ts`, string | `Text.string` | `Text.utf8`, bytes | `json-fast.ts`, string | `json-fast.ts`, bytes |
+|---|---|---|---|---|---|
+| records, 1 KB | 4.0× | 3.7× | 2.9× | 2.4× | 1.9× |
+| records, 600 KB, pretty-printed | 4.1× | 4.0× | 2.2× | 2.7× | 1.5× |
+| records, 4 MB | 3.9× | 3.9× | 3.3× | 2.7× | 1.8× |
+| numbers, 1 MB | 1.2× | 1.2× | 1.0× | 1.2× | 1.0× |
+| ASCII strings, 1 MB | 2.9× | 3.1× | 3.1× | 3.0× | 3.1× |
+| escaped strings, 1 MB | 4.8× | 5.7× | 4.1× | 4.2× | 4.1× |
+| deep nesting, 100 KB | 2.1× | 2.2× | 1.8× | 1.4× | 1.2× |
 
 Numbers come within 1.2× of `JSON.parse` because floats are converted
 without slicing (above); for numbers with more than 15 significant digits,
@@ -534,14 +550,17 @@ bytes, every string longer than 24 bytes costs a `TextDecoder` call, which
 has a fixed cost of about 100 ns. Records and nesting are dominated by the grammar's
 `Object.fromEntries` (below).
 
-The JIT's remaining gap to the hand-fused parser is mostly the grammar
+The JIT's remaining gap to the hand-fused parser was mostly the grammar
 itself: `object` collects `[key, value]` tuples and calls
-`Object.fromEntries`, while the hand-fused code assigns properties
-directly. The same grammar building its objects with a `fold` compiles to
-5.2 ms, within 1.3× of hand-fused code.
+`Object.fromEntries` in a lambda, about 90 ns per entry (three times a
+loop of assignments) and a third of the profile on records.
+`json-fast.ts` builds objects with `Parser.fromEntries`, which compiles to
+assignments (pipeline step 6), and parses records at the speed of the
+hand-fused parser.
 
 What runs interpreted in the JSON grammars: only the parser returned by the
-`flatMap` in `\uXXXX` escapes (its first parser, `hex4`, is compiled). The
+`flatMap` in `\uXXXX` escapes (its first parser, `hex4`, is compiled);
+`json-fast.ts` writes those escapes with `alt` and `cut` instead. The
 closure compiler leaves UTF-16 at 1.4× because it decodes every code
 point through `Encoding.decode`; the JIT's unit reader removes that.
 

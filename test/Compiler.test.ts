@@ -8,6 +8,7 @@ import * as Arithmetic from "../examples/arithmetic.js"
 import * as Http from "../examples/http.js"
 import * as Ini from "../examples/ini.js"
 import * as Json from "../examples/json.js"
+import * as JsonFast from "../examples/json-fast.js"
 import { makeJson } from "../examples/json-text.js"
 import * as Sexpr from "../examples/sexpr.js"
 import type { Input } from "../src/index.js"
@@ -161,6 +162,29 @@ describe("compiled examples", () => {
     for (const input of jsonInputs) same(p, (encode as (s: string) => Input.Input)(input))
   })
 
+  it.each([
+    ["Text.string", Text.string, (s: string) => s],
+    ["Text.utf8", Text.utf8, (s: string) => Encoding.utf8.encode(s)],
+    ["Text.utf16le", Text.utf16le, (s: string) => Encoding.utf16le.encode(s)]
+  ] as const)("json-fast with %s, accepting what json-text accepts", (_, T, encode) => {
+    const fast = JsonFast.makeJson(T as Text.TextParsers<any>)
+    const text = makeJson(T as Text.TextParsers<any>)
+    const inputs = [
+      ...jsonInputs,
+      "{\"__proto__\": 1, \"toString\": [2], \"constructor\": {\"__proto__\": null}}",
+      "{\"a\": 1, \"a\": 2, \"b\": {\"a\": 3, \"a\": 4}}",
+      "\"\\ud83d\\ude00\\udc00\\u0041\"", "\"\\ud83d\\u0041\"", "\"\\ud83d\"", "\"\\ud83d\\x\""
+    ]
+    for (const input of inputs) {
+      const bytes = (encode as (s: string) => Input.Input)(input)
+      same(fast, bytes)
+      const a = Parser.parse(fast, bytes as never)
+      const b = Parser.parse(text, bytes as never)
+      expect(Result.isSuccess(a), input).toBe(Result.isSuccess(b))
+      if (Result.isSuccess(a) && Result.isSuccess(b)) expect(a.success, input).toEqual(b.success)
+    }
+  })
+
   it("json-text on malformed bytes", () => {
     const p = makeJson(Text.utf8)
     const random = rng(7)
@@ -276,6 +300,13 @@ const grammars: ReadonlyArray<readonly [string, Parser.Parser<any, any, never, s
   ["takeWhile with a string predicate", Token.takeWhile((c: string) => c !== "b" && c < "😀")],
   ["takeUntil", Parser.seq(Token.takeUntil("ab"), Token.rest)],
   ["literal edge cases", Parser.seq(Token.literal(""), Parser.opt(Token.literal("a😀")), Parser.opt(Ascii.caseless("Ab")))],
+  ["fromEntries of separated pairs", Parser.fromEntries(Parser.separated(Parser.separatedPair(Token.oneOf("ab"), Token.literal("+"), Parser.opt(digit)), Token.literal("\\")))],
+  ["fromEntries of a ranged repeat", Parser.fromEntries(Parser.repeat(Parser.seq(Token.oneOf("ab01"), Parser.opt(Token.literal("e"))), { min: 1, max: 3 }))],
+  ["fromEntries through preceded and cut", Parser.preceded(a, Parser.cut(Parser.terminated(Parser.separated(Parser.seq(digit, Token.oneOf("ab")), Token.literal("+"), { max: 2 }), b))).pipe(Parser.fromEntries, Parser.context("entries"))],
+  // Keys need not be property keys: they are converted, as Object.fromEntries does
+  ["fromEntries of nothing", Parser.fromEntries(Parser.repeat(Parser.seq(Parser.opt(a), Parser.opt(b))) as unknown as Parser.Parser<Array<[string, unknown]>>)],
+  ["fromEntries of separated nothing", Parser.fromEntries(Parser.separated(Parser.seq(Parser.opt(a), Parser.opt(digit)), Parser.opt(b)) as unknown as Parser.Parser<Array<[string, unknown]>>)],
+  ["map(Object.fromEntries)", Parser.map(Parser.separated(Parser.separatedPair(digit, Parser.opt(Token.literal(".")), Token.oneOf("ab")), Token.literal("+")), Object.fromEntries)],
   ["Ascii numbers", Parser.separated(Parser.alt(Ascii.float, Ascii.hexUint), Token.literal(","))],
   ["Ascii integers", Parser.seq(Ascii.decInt, Parser.opt(Parser.preceded(Token.literal(":"), Ascii.decUint)))],
   ["Ascii classes", Parser.seq(Ascii.alpha0, Ascii.digit0, Ascii.space0, Parser.opt(Ascii.alphanumeric1), Parser.opt(Ascii.lineEnding))],
@@ -471,6 +502,35 @@ describe("compiled combinators", () => {
             expect(Object.is(actual.success[0], expected.success[0]), `${backend} on ${input}`).toBe(true)
           }
         }
+      }
+    }
+  })
+
+  // Compiled parsers assign plain keys and define the others, as
+  // Object.fromEntries does
+  it("fromEntries keys", () => {
+    const sym = Symbol("s")
+    const key = Parser.alt(
+      Token.literal("p").pipe(Parser.as("__proto__")),
+      Token.literal("t").pipe(Parser.as("toString")),
+      Token.literal("x").pipe(Parser.as("x")),
+      // An object key that converts to "x", and one whose conversion counts
+      Token.literal("o").pipe(Parser.map(() => ({ toString: () => "x" }))),
+      Token.literal("s").pipe(Parser.as(sym)),
+      Token.literal("1").pipe(Parser.as(1)),
+      Token.literal("n").pipe(Parser.as(null))
+    )
+    const entries = Parser.fromEntries(Parser.repeat(Parser.seq(key, Token.oneOf("abc"))) as unknown as Parser.Parser<Array<[string, string]>>)
+    const describe = (o: any) => ({
+      proto: Object.getPrototypeOf(o) === Object.prototype,
+      keys: Reflect.ownKeys(o).map(String),
+      values: Reflect.ownKeys(o).map((k) => o[k]),
+      descriptors: Reflect.ownKeys(o).map((k) => Object.getOwnPropertyDescriptor(o, k))
+    })
+    for (const input of allStrings(["pa", "tb", "xa", "oc", "sb", "1a", "nb"], 3).map((s) => s)) {
+      const expected = describe(Parser.parseSync(entries, input))
+      for (const backend of backends) {
+        expect(describe(Parser.parseSync(twin(entries, backend), input)), `${backend} on ${input}`).toEqual(expected)
       }
     }
   })
