@@ -51,6 +51,7 @@ effect-nom requires `effect` 4.x as a peer dependency.
 - [The `Parser` type](#the-parser-type)
 - [Writing parsers](#writing-parsers)
 - [Running parsers](#running-parsers)
+- [Compiled parsers](#compiled-parsers)
 - [Errors](#errors)
 - [Streaming and partial input](#streaming-and-partial-input)
 - [Services](#services)
@@ -201,6 +202,32 @@ Wider typed arrays are viewed in the platform's byte order, which is little
 endian on all common platforms. So a `Uint16Array` of UTF-16 code units can
 be parsed with `Text.utf16le`. `Input.fromSource` performs the same
 conversion.
+
+## Compiled parsers
+
+Combinators are flexible but run as a tree of closures. `Parser.compile`
+turns a grammar into fused, specialized code, without changing how it is
+written or what it returns:
+
+```ts
+export const json = Parser.compile(Parser.preceded(ws, value))
+
+Parser.parse(json, text) // same Result as before, several times faster
+```
+
+`compile` returns the same parser. The code is built on the first run, for
+each kind of input, and cached. `parse`, `parseSync`, `parsePeek` and
+`parseEffect` use it; partial input, `parseRecoverable` and tracing stay
+interpreted. With `{ backend: "auto" }` (the default) it generates
+JavaScript where `new Function` is allowed; `{ backend: "closure" }` never
+generates code, for pages with a Content Security Policy.
+
+Compiled code records no diagnostics. When it fails, the parser runs again
+interpreted, so errors are exactly the same, byte for byte. Callbacks should
+therefore be pure: on failing input they may run twice, and those whose
+results are unused may be skipped. Parsers built with `Parser.make` or
+`Parser.gen` run interpreted inside compiled code. See the
+[design notes](docs/DESIGN.md#6-compiled-parsers) for details.
 
 ## Errors
 

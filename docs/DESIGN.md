@@ -359,10 +359,10 @@ Compilation is opt-in, not automatic, because:
   `Parser.compile(...)` around the root is all it takes. Sub-parsers need
   nothing.
 
-`options.backend` is `"auto"` (default: the JIT when `new Function` works,
-otherwise the closure compiler), `"jit"` (same, but never silently falls
-back to closures except when unsupported), or `"closure"` (never generates
-code, for CSP environments).
+`options.backend` is `"auto"` (the default: the JIT when `new Function`
+works, otherwise the closure compiler) or `"closure"` (never generates code,
+not even the probe, for CSP environments). A separate `"jit"` choice would
+add nothing: it too has to fall back when `new Function` is blocked.
 
 ### When the compiled code runs
 

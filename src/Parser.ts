@@ -42,6 +42,7 @@ import type { ErrMode, Input, Slice, Source, TraceEvent } from "./Input.js"
 import { Fail, Failure, mergeExpected, mergeFailures, State } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
 import * as ParseError from "./ParseError.js"
+import * as Compiler from "./internal/compiler/registry.js"
 import type { Node } from "./internal/node.js"
 import { bounds, NodeId } from "./internal/node.js"
 
@@ -2273,6 +2274,93 @@ export const consoleTracer = (event: TraceEvent): void => {
 }
 
 // -----------------------------------------------------------------------------
+// Compilation
+// -----------------------------------------------------------------------------
+
+/**
+ * Options for {@link compile}.
+ *
+ * @since 0.1.0
+ * @category compilation
+ */
+export interface CompileOptions {
+  /**
+   * Which compiler to use:
+   *
+   * - `"auto"` (the default): generated code (a JIT) where `new Function`
+   *   is allowed, otherwise specialized closures
+   * - `"closure"`: specialized closures only. It never generates code, so
+   *   it is the choice under a Content Security Policy, where even probing
+   *   for `new Function` is reported as a violation.
+   */
+  readonly backend?: "auto" | "closure" | undefined
+}
+
+/**
+ * Compiles a parser into fused, specialized code, and returns the same
+ * parser. Grammars are written as usual; compilation only makes
+ * {@link parse}, {@link parseSync}, {@link parsePeek} and
+ * {@link parseEffect} faster. Compile the root of a grammar once, where it
+ * is defined:
+ *
+ * ```ts
+ * import { Ascii, Parser, Token } from "effect-nom"
+ *
+ * export const list = Parser.compile(
+ *   Parser.separated(Ascii.decInt, Token.literal(","))
+ * )
+ * Parser.parse(list, "1,2,3") // Result.succeed([1, 2, 3]), compiled
+ * ```
+ *
+ * The code is generated lazily on the first run, for each kind of input
+ * (string, bytes or array), and cached with the parser.
+ *
+ * **Results and errors are unchanged.** Compiled code records no
+ * diagnostics. When it fails, the parser runs again, interpreted, from the
+ * start, so every `ParseError` (offset, expected, context, cause and
+ * message) is exactly the one the interpreter reports.
+ *
+ * **Callbacks should be pure.** On an input that fails, the callbacks given
+ * to `map`, `filter`, `tryMap`, `tap`, `fold`, ... may run twice, once
+ * compiled and once interpreted. Callbacks whose results are discarded
+ * (a `map` inside `taken` or `preceded`, for example) may not run at all,
+ * nor those of a branch that is certain to fail, and token-set predicates
+ * may be called once per character code and cached.
+ *
+ * Runs on partial input ({@link parsePartial}, `ParserStream`), with
+ * {@link parseRecoverable} or with the `trace` option are always
+ * interpreted. Parsers that can't be described, such as {@link make} and
+ * {@link gen}, run interpreted inside compiled code.
+ *
+ * @since 0.1.0
+ * @category compilation
+ */
+export const compile: {
+  (options?: CompileOptions): <A, E, R, I extends Input>(self: Parser<A, E, R, I>) => Parser<A, E, R, I>
+  <A, E, R, I extends Input>(self: Parser<A, E, R, I>, options?: CompileOptions): Parser<A, E, R, I>
+} = dual(isParserArg, <A, E, R, I extends Input>(self: Parser<A, E, R, I>, options?: CompileOptions) => {
+  Compiler.register(self, options?.backend ?? "auto")
+  return self
+})
+
+/** Returned by {@link runCompiled} when there is no compiled form to run. */
+const NotCompiled: unique symbol = Symbol("NotCompiled")
+
+/**
+ * Runs the compiled form of `self`, if it has one: returns its value, or
+ * `Fail` when it failed (or, with `whole`, did not consume the whole
+ * input), in which case the state must be thrown away.
+ */
+const runCompiled = <I extends Input>(self: Parser.Any, state: State<I>, whole: boolean): unknown => {
+  if (state.tracer !== undefined || state.recovered !== undefined) return NotCompiled
+  const step = Compiler.stepFor(self, state)
+  if (step === undefined) return NotCompiled
+  const a = step(state)
+  if (a === Fail || (whole && state.pos < state.end)) return Fail
+  return a
+}
+
+// -----------------------------------------------------------------------------
 // Running
 // -----------------------------------------------------------------------------
 
@@ -2313,6 +2401,20 @@ const makeState = <I extends Input>(
 
 const toError = <E>(state: State<any>): ParseError.ParseError<E> =>
   ParseError.fromFailure<E>(state.input, state.reportedFailure(), state.mode, state.encoding)
+
+/** Runs a parser against a complete input, compiled when possible. */
+const parseComplete = <A, E, R, I extends Input>(
+  self: Parser<A, E, R, I>,
+  input: I | Source<I>,
+  options: (ParseOptions & { readonly context?: Context.Context<any> }) | undefined
+): Result.Result<A, ParseError.ParseError<E>> => {
+  const state = makeState(input, options, false)
+  const a = runCompiled(self, state, true)
+  if (a === NotCompiled) return runComplete(self, state)
+  if (a !== Fail) return Result.succeed(a as A)
+  // Re-run interpreted for the diagnostics
+  return runComplete(self, makeState(input, options, false))
+}
 
 const runComplete = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
@@ -2358,7 +2460,7 @@ export const parse: {
   self: Parser<A, E, R, I>,
   input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
-): Result.Result<A, ParseError.ParseError<E>> => runComplete(self, makeState(input, options, false))
+): Result.Result<A, ParseError.ParseError<E>> => parseComplete(self, input, options)
 
 /**
  * Like {@link parse}, but throws the `ParseError` on failure.
@@ -2374,7 +2476,7 @@ export const parseSync: {
   input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
 ): A => {
-  const result = runComplete(self, makeState(input, options, false))
+  const result = parseComplete(self, input, options)
   if (Result.isSuccess(result)) return result.success
   throw result.failure
 }
@@ -2403,7 +2505,12 @@ export const parsePeek: {
   input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
 ): Result.Result<[remaining: Slice<I>, output: A], ParseError.ParseError<E>> => {
-  const state = makeState(input, options, false)
+  let state = makeState(input, options, false)
+  const compiled = runCompiled(self, state, false)
+  if (compiled !== NotCompiled && compiled !== Fail) {
+    return Result.succeed([state.slice(state.pos, state.end), compiled as A])
+  }
+  if (compiled === Fail) state = makeState(input, options, false)
   const a = self.step(state)
   if (a === Fail) return Result.fail(toError(state))
   return Result.succeed([state.slice(state.pos, state.end), a])
@@ -2495,7 +2602,7 @@ export const parseEffect = <A, E, R, I extends Input>(
 ): Effect.Effect<A, ParseError.ParseError<E>, R> =>
   Effect.flatMap(
     Effect.context<R>(),
-    (context) => Effect.fromResult(runComplete(self, makeState(input, { ...options, context }, false)))
+    (context) => Effect.fromResult(parseComplete(self, input, { ...options, context }))
   )
 
 /**
