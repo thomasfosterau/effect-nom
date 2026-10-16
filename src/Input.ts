@@ -13,6 +13,7 @@
  * @since 0.1.0
  */
 import * as Context from "effect/Context"
+import type { Encoding } from "./Encoding.js"
 import type { ErrorKind } from "./ParseError.js"
 
 /**
@@ -27,6 +28,57 @@ import type { ErrorKind } from "./ParseError.js"
  * @category models
  */
 export type Input = string | Uint8Array | ReadonlyArray<unknown>
+
+/**
+ * Binary data that can be passed wherever a `Uint8Array` input is expected:
+ * an `ArrayBuffer`, a `SharedArrayBuffer`, a `DataView` or any typed array.
+ *
+ * It is viewed, not copied, as a `Uint8Array` of its bytes. A typed array
+ * with wider elements is viewed in the platform's byte order, which is
+ * little endian on all common platforms, so a `Uint16Array` of UTF-16 code
+ * units can be parsed with `Text.utf16le`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export type BinaryInput = ArrayBufferLike | ArrayBufferView
+
+/**
+ * What the runners accept for a parser over `I`: the input itself, or, for
+ * byte parsers, any {@link BinaryInput}.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export type Source<I> = I | ([I] extends [Uint8Array] ? BinaryInput : never)
+
+/**
+ * Converts a {@link Source} to the input parsers read: binary data becomes a
+ * `Uint8Array` view of the same memory, everything else is returned as is.
+ *
+ * @example
+ * ```ts
+ * import { Input } from "effect-nom"
+ *
+ * Input.fromSource(new Uint16Array([0x41]).buffer) // Uint8Array [0x41, 0x00]
+ * ```
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
+export const fromSource: {
+  (source: BinaryInput): Uint8Array
+  <I extends Input>(source: Source<I>): I
+} = (source: Input | BinaryInput): any => {
+  if (typeof source === "string" || source instanceof Uint8Array || Array.isArray(source)) return source
+  if (ArrayBuffer.isView(source)) return new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+  // An explicit length fixes the view's size even for a resizable buffer
+  if (isArrayBufferLike(source)) return new Uint8Array(source, 0, source.byteLength)
+  return source
+}
+
+const isArrayBufferLike = (u: unknown): u is ArrayBufferLike =>
+  u instanceof ArrayBuffer || (typeof SharedArrayBuffer !== "undefined" && u instanceof SharedArrayBuffer)
 
 /**
  * The type of a single token of an input.
@@ -173,12 +225,18 @@ export class State<I extends Input = Input> {
   tracer: ((event: TraceEvent) => void) | undefined = undefined
   /** Current tracing depth. */
   depth = 0
+  /**
+   * The text encoding of a byte input, recorded by `Text` parsers when they
+   * fail so that errors can show the input as text.
+   */
+  encoding: Encoding<any> | undefined = undefined
 
-  constructor(input: I, options?: {
+  constructor(source: I | Source<I>, options?: {
     readonly partial?: boolean | undefined
     readonly context?: Context.Context<never> | undefined
     readonly offset?: number | undefined
   }) {
+    const input = fromSource(source as Input) as I
     this.input = input
     this.end = input.length
     this.pos = options?.offset ?? 0

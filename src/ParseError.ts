@@ -21,7 +21,9 @@
  */
 import * as Data from "effect/Data"
 import * as Option from "effect/Option"
+import type { Encoding } from "./Encoding.js"
 import type { ErrMode, Failure, Input } from "./Input.js"
+import * as text from "./internal/text.js"
 
 /**
  * The kind of parser that produced an error, in the spirit of nom's
@@ -93,6 +95,11 @@ export class ParseError<out E = never> extends Data.TaggedError("ParseError")<{
   readonly cause: E | undefined
   /** An optional free-form description. */
   readonly description: string | undefined
+  /**
+   * For byte inputs parsed by `Text` parsers, the text encoding. Errors
+   * then show the input as text, with line and column numbers.
+   */
+  readonly encoding?: Encoding<Uint8Array> | undefined
 }> {
   /**
    * @since 0.1.0
@@ -100,13 +107,13 @@ export class ParseError<out E = never> extends Data.TaggedError("ParseError")<{
   readonly [TypeId]: typeof TypeId = TypeId
 
   /**
-   * The 1-based line and column of the failure (strings only; for other
-   * inputs the line is 1 and the column is `offset + 1`).
+   * The 1-based line and column of the failure (for strings and encoded
+   * text; for other inputs the line is 1 and the column is `offset + 1`).
    *
    * @since 0.1.0
    */
   get position(): LineColumn {
-    return lineColumn(this.input, this.offset)
+    return lineColumn(this.input, this.offset, this.encoding)
   }
 
   /**
@@ -139,7 +146,12 @@ export const isParseError = (u: unknown): u is ParseError<unknown> =>
  * @since 0.1.0
  * @category constructors
  */
-export const fromFailure = <E = never>(input: Input, failure: Failure, mode: ErrMode): ParseError<E> =>
+export const fromFailure = <E = never>(
+  input: Input,
+  failure: Failure,
+  mode: ErrMode,
+  encoding?: Encoding<any> | undefined
+): ParseError<E> =>
   new ParseError<E>({
     input,
     offset: failure.offset,
@@ -148,7 +160,8 @@ export const fromFailure = <E = never>(input: Input, failure: Failure, mode: Err
     expected: failure.expected,
     context: failure.context,
     cause: failure.hasCause ? failure.cause as E : undefined,
-    description: failure.message
+    description: failure.message,
+    encoding: input instanceof Uint8Array ? encoding : undefined
   })
 
 /**
@@ -173,13 +186,27 @@ export interface LineColumn {
 
 /**
  * Computes the 1-based line and column (in code points) of an offset. Lines
- * are separated by `\n`. For non-string inputs the line is always 1 and the
- * column is `offset + 1`.
+ * are separated by `\n`. Byte inputs are read as text when an `encoding`
+ * is given. For other inputs the line is always 1 and the column is
+ * `offset + 1`.
  *
  * @since 0.1.0
  * @category utils
  */
-export const lineColumn = (input: Input, offset: number): LineColumn => {
+export const lineColumn = (input: Input, offset: number, encoding?: Encoding<any> | undefined): LineColumn => {
+  if (encoding !== undefined && input instanceof Uint8Array) {
+    let line = 1
+    let column = 1
+    text.walk(encoding, input, 0, Math.min(offset, input.length), (cp) => {
+      if (cp === 10) {
+        line++
+        column = 1
+      } else {
+        column++
+      }
+    })
+    return { line, column }
+  }
   if (typeof input !== "string") return { line: 1, column: offset + 1 }
   let line = 1
   let lineStart = 0
@@ -217,8 +244,19 @@ export const formatExpected = (expected: ReadonlyArray<string>): string => {
   return `${expected.slice(0, -1).join(", ")} or ${expected[expected.length - 1]}`
 }
 
-const describeFound = (input: Input, offset: number): string => {
+const hexBytes = (bytes: Uint8Array): string =>
+  Array.from(bytes, (b) => `0x${b.toString(16).padStart(2, "0")}`).join(" ")
+
+const describeFound = (input: Input, offset: number, encoding: Encoding<any> | undefined): string => {
   if (offset >= input.length) return "end of input"
+  if (encoding !== undefined && input instanceof Uint8Array) {
+    const cp = encoding.decode(input, offset, input.length)
+    if (cp >= 0) return JSON.stringify(String.fromCodePoint(cp))
+    const bad = input.subarray(offset, Math.min(input.length, offset + Math.max(encoding.unit, 1)))
+    return cp === text.Truncated
+      ? `incomplete ${encoding.name} sequence ${hexBytes(input.subarray(offset))}`
+      : `invalid ${encoding.name} ${hexBytes(bad)}`
+  }
   if (typeof input === "string") {
     const cp = input.codePointAt(offset)!
     return JSON.stringify(String.fromCodePoint(cp))
@@ -252,7 +290,35 @@ const causeMessage = (cause: unknown): string | undefined => {
   return inspectToken(cause)
 }
 
-const renderSnippet = (input: Input, offset: number): Array<string> => {
+const renderSnippet = (input: Input, offset: number, encoding: Encoding<any> | undefined): Array<string> => {
+  if (encoding !== undefined && input instanceof Uint8Array) {
+    // Find the line containing `offset`, then decode it
+    let lineStart = 0
+    let end = input.length
+    let column = 1
+    text.walk(encoding, input, 0, input.length, (cp, i, w) => {
+      if (i >= offset && cp === 10) {
+        end = i
+        return false
+      }
+      if (i < offset) {
+        if (cp === 10) {
+          lineStart = i + w
+          column = 1
+        } else {
+          column++
+        }
+      }
+    })
+    let line = text.lenientText(encoding, input, lineStart, end)
+    if (line.endsWith("\r")) line = line.slice(0, -1)
+    const gutter = String(lineColumn(input, offset, encoding).line)
+    const pad = " ".repeat(gutter.length)
+    return [
+      `${gutter} | ${line}`,
+      `${pad} | ${" ".repeat(column - 1)}^`
+    ]
+  }
   if (typeof input === "string") {
     const { column, line } = lineColumn(input, offset)
     let start = offset
@@ -283,15 +349,18 @@ const renderSnippet = (input: Input, offset: number): Array<string> => {
 }
 
 const render = (error: ParseError<unknown>): string => {
-  const { input, offset } = error
+  const { encoding, input, offset } = error
   const lines: Array<string> = []
   if (typeof input === "string") {
     const { column, line } = lineColumn(input, offset)
     lines.push(`Parse error at line ${line}, column ${column}:`)
+  } else if (encoding !== undefined) {
+    const { column, line } = lineColumn(input, offset, encoding)
+    lines.push(`Parse error at line ${line}, column ${column} (byte ${offset}):`)
   } else {
     lines.push(`Parse error at offset ${offset}:`)
   }
-  lines.push(...renderSnippet(input, offset))
+  lines.push(...renderSnippet(input, offset, encoding))
   for (let i = error.context.length - 1; i >= 0; i--) {
     lines.push(`while parsing ${error.context[i]}`)
   }
@@ -301,9 +370,9 @@ const render = (error: ParseError<unknown>): string => {
   if (error.mode === "Incomplete") {
     lines.push("unexpected end of input (incomplete)")
   } else if (error.expected.length > 0) {
-    lines.push(`expected ${formatExpected(error.expected)}, found ${describeFound(input, offset)}`)
+    lines.push(`expected ${formatExpected(error.expected)}, found ${describeFound(input, offset, encoding)}`)
   } else if (cause === undefined && error.description === undefined) {
-    lines.push(`unexpected ${describeFound(input, offset)} (${error.kind})`)
+    lines.push(`unexpected ${describeFound(input, offset, encoding)} (${error.kind})`)
   }
   return lines.join("\n")
 }
