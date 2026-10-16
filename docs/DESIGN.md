@@ -105,6 +105,66 @@ parameter that defaults to `string`, much like Rust's turbofish:
 argument (`Token.literal(new Uint8Array([1]))`), it is. The `Binary` module
 is typed for bytes only.
 
+### Text and encodings
+
+nom and winnow parse `&str` and `&[u8]`, and their character parsers are
+ASCII. effect-nom adds a `Text` module for Unicode text in any encoding.
+
+**One implementation, many encodings.** An `Encoding` is a small record:
+`decode(input, offset, end)` returns a code point, *malformed* (-1) or
+*truncated* (-2), and there are also `width`, `encode` and `text` (slice to
+string). `Text.make(encoding)` builds every text parser from one generic
+implementation, and returns a `TextParsers<I>` record. Grammars written
+against that record parse JavaScript strings, UTF-8, UTF-16LE/BE and
+Latin-1 unchanged, and users can add encodings. The parsers are a record of
+values rather than functions with an encoding argument, so they are built
+once per encoding and the encoding never appears in a hot loop's call
+signature.
+
+**Why not parse bytes everywhere?** An obvious design would be to encode
+strings to UTF-8 with `TextEncoder` and parse only bytes. We measured it on
+V8 with a 0.5 MB document:
+
+| Operation | Time |
+|---|---|
+| `TextEncoder.encode` of the whole document | 0.9 ms |
+| scanning digits, string (`charCodeAt`) | 1.25 ms |
+| scanning digits, bytes | 0.53 ms |
+| 37k slices with `String.prototype.slice` | 0.7 ms |
+| 37k slices with `TextDecoder.decode(subarray)` | 5.0 ms |
+| 37k slices built with `String.fromCharCode` | 2.9 ms |
+
+Scanning bytes is faster, but text parsers mostly *produce strings*, and
+building a string from bytes costs 4–7 times more than slicing a string. It
+would also turn string offsets into byte offsets, which would break spans,
+error columns and `Parser.location`. So strings are parsed natively, as
+UTF-16 code units, and only byte inputs are decoded. Short slices of bytes
+are built by hand (that beats `TextDecoder`'s fixed cost below about 24
+bytes), and longer ones use `TextDecoder`. With the JSON grammar (best of
+interleaved runs), `Text.string` was 5–15% slower than the hand-written
+`Token`/`Ascii` parser, and `Text.utf8` on bytes was within about 10% of
+`TextDecoder` followed by `Text.string`. The generic scan loop, which calls
+through the encoding and predicate, accounts for most of the difference.
+
+**Fast paths.** The scan loop skips `decode` for units that are known to be
+single-unit code points: below 0xD800 for strings, below 0x80 for UTF-8 and
+0x100 for Latin-1. Unicode predicates (`Text.isLetter`, built on regular
+expression property escapes) cache their answers for the BMP in a lazily
+allocated table. They are marked as *code-point predicates*, so `Token` and
+`Text` call them with numbers instead of allocating a string per character.
+This also applies to the `Ascii` predicates.
+
+**Strictness.** Text parsers never match malformed input: invalid UTF-8,
+overlong forms, surrogates encoded in UTF-8, and unpaired UTF-16
+surrogates. On partial input, a sequence cut off at the end reports
+`Incomplete`, so byte streams can be parsed as text chunk by chunk. `Token`
+keeps its lenient handling of lone surrogates in strings.
+
+**Errors.** `Text` parsers on byte input record their encoding on the
+`State`, and the runners copy it to `ParseError.encoding`. The error message
+then decodes the line (replacing malformed bytes with U+FFFD) and reports
+the line and column in code points, plus the byte offset.
+
 ### Error model
 
 Internally a failure stores a small error record on the parse state, then
@@ -150,6 +210,8 @@ expected value
 | `Input` | Input/token/slice types, the `State` cursor used by `Parser.make` |
 | `Token` | `any`, `literal`, `oneOf`, `noneOf`, `take`, `takeWhile`, `takeTill`, `takeUntil`, `rest`, `restLen`, and `TokenSet` (`string`, predicate, array, ranges) |
 | `Ascii` | `digit0/1`, `alpha0/1`, `alphanumeric0/1`, `hexDigit0/1`, `octDigit0/1`, `space0/1`, `multispace0/1`, `crlf`, `lineEnding`, `newline`, `tab`, `tillLineEnding`, `decUint`, `decInt`, `hexUint`, `float`, `takeEscaped`, `escapedTransform`, `caseless`, character predicates, and an `Ascii.bytes` view for `Uint8Array` input |
+| `Text` | `TextParsers<I>` built by `make(encoding)`, with `string`, `utf8`, `utf16le`, `utf16be` and `latin1` instances: tokens, slices, Unicode character classes, `identifier`, line endings, numbers and escapes; Unicode predicates and `property` |
+| `Encoding` | The `Encoding` interface, the built-in encodings, and `sniff` (BOM detection) |
 | `Binary` | `u8`, `i8`, `be*/le*` numbers (16/24/32 as `number`, 64/128 as `bigint`), floats, `lengthTake`, `lengthRepeat`, `lengthAndThen`, `bits` |
 | `Bits` | Bit-level parsers inside `Binary.bits`: `take`, `pattern`, `bool`, `bytes` |
 | `Expression` | Pratt / precedence-climbing expression parser (from `nom-language::precedence`) |
@@ -189,4 +251,7 @@ expected value
 - **The progress check** (a parser that succeeds without consuming input is
   rejected) applies only to unbounded repetitions. Bounded ones simply end.
 - **Strings are parsed by code point.** A surrogate pair split across two
-  partial chunks is reported as `Incomplete`.
+  partial chunks is reported as `Incomplete`. The same goes for a UTF-8 or
+  UTF-16 sequence split across chunks of bytes parsed with `Text`.
+- **Unicode text in any encoding** (`Text`, `Encoding`) has no equivalent
+  in nom or winnow, whose character parsers are ASCII.

@@ -4,8 +4,9 @@ import * as Arithmetic from "../examples/arithmetic.js"
 import * as Http from "../examples/http.js"
 import * as Ini from "../examples/ini.js"
 import * as Json from "../examples/json.js"
+import { makeJson } from "../examples/json-text.js"
 import * as Sexpr from "../examples/sexpr.js"
-import { Parser, ParserStream } from "../src/index.js"
+import { Encoding, Parser, ParserStream, Text } from "../src/index.js"
 import { expectFailure, expectSuccess } from "./utils.js"
 
 describe("examples/json", () => {
@@ -52,6 +53,24 @@ describe("examples/json", () => {
   it("rejects bad escapes", () => {
     const err = expectFailure(Json.json, "\"\\x\"")
     expect(err.expected).toEqual(["escape sequence"])
+  })
+})
+
+describe("examples/json-text", () => {
+  const doc = `{"name": "Zoë 😀", "tags": ["α", "\\u00e9"], "n": -1.5e2, "ok": [true, null]}`
+  const expected = JSON.parse(doc)
+
+  it.each([
+    ["string", Text.string, (s: string) => s],
+    ["utf8", Text.utf8, (s: string) => new TextEncoder().encode(s)],
+    ["utf16le", Text.utf16le, Encoding.utf16le.encode],
+    ["utf16be", Text.utf16be, Encoding.utf16be.encode]
+  ] as const)("parses %s input with one grammar", (_, T, encode) => {
+    const json = makeJson<any>(T)
+    expectSuccess(json, encode(doc), expected)
+    const err = expectFailure(json, encode("{\"é\": [1,,2]}"))
+    expect(err.position).toEqual({ line: 1, column: 10 })
+    expect(err.message).toContain("expected value, found \",\"")
   })
 })
 

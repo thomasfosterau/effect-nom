@@ -103,13 +103,27 @@ const compileToken = (u: unknown): (token: unknown) => boolean => {
 }
 
 /**
+ * Marks a predicate over characters that also accepts a code point (a
+ * number), so string inputs can call it without allocating a string per
+ * character.
+ */
+export const CodePointPredicate: unique symbol = Symbol.for("effect-nom/CodePointPredicate")
+
+/** Marks `f` as a {@link CodePointPredicate} named `name` (used in error messages). */
+export const codePointPredicate = <F extends (c: string | number) => boolean>(name: string, f: F): F => {
+  Object.defineProperty(f, "name", { value: name })
+  ;(f as any)[CodePointPredicate] = true
+  return f
+}
+
+/**
  * Compiles a token set. Predicates for string inputs receive the token as a
  * string, so they are wrapped here.
  */
 export const compile = (set: unknown, kind: "string" | "code" = "code"): Matcher => {
   const description = describeSet(set)
   let code: (code: number) => boolean
-  if (typeof set === "function" && kind === "string") {
+  if (typeof set === "function" && kind === "string" && !(CodePointPredicate in set)) {
     const pred = set as (c: string) => boolean
     code = (x) => pred(String.fromCodePoint(x))
   } else {

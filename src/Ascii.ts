@@ -16,6 +16,9 @@
  * Partial (streaming) input is supported: for example `digit1` on the
  * partial input `"123"` reports `Incomplete`, since more digits may follow.
  *
+ * For Unicode character classes, or for text in other encodings (UTF-8,
+ * UTF-16), use the `Text` module.
+ *
  * @since 0.1.0
  */
 import * as Result from "effect/Result"
@@ -24,6 +27,7 @@ import { Fail } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
 import type { Parser } from "./Parser.js"
 import * as P from "./Parser.js"
+import { codePointPredicate } from "./internal/tokens.js"
 import { literalImpl, range, takeWhileImpl } from "./Token.js"
 import * as Token from "./Token.js"
 
@@ -39,10 +43,10 @@ const code = (c: string | number): number => typeof c === "number" ? c : c.charC
  * @since 0.1.0
  * @category predicates
  */
-export const isAlpha = (c: string | number): boolean => {
+export const isAlpha: (c: string | number) => boolean = codePointPredicate("isAlpha", (c: string | number): boolean => {
   const x = code(c)
   return (x >= 65 && x <= 90) || (x >= 97 && x <= 122)
-}
+})
 
 /**
  * `[0-9]`
@@ -50,10 +54,10 @@ export const isAlpha = (c: string | number): boolean => {
  * @since 0.1.0
  * @category predicates
  */
-export const isDigit = (c: string | number): boolean => {
+export const isDigit: (c: string | number) => boolean = codePointPredicate("isDigit", (c: string | number): boolean => {
   const x = code(c)
   return x >= 48 && x <= 57
-}
+})
 
 /**
  * `[0-9a-fA-F]`
@@ -61,10 +65,10 @@ export const isDigit = (c: string | number): boolean => {
  * @since 0.1.0
  * @category predicates
  */
-export const isHexDigit = (c: string | number): boolean => {
+export const isHexDigit: (c: string | number) => boolean = codePointPredicate("isHexDigit", (c: string | number): boolean => {
   const x = code(c)
   return (x >= 48 && x <= 57) || (x >= 65 && x <= 70) || (x >= 97 && x <= 102)
-}
+})
 
 /**
  * `[0-7]`
@@ -72,10 +76,10 @@ export const isHexDigit = (c: string | number): boolean => {
  * @since 0.1.0
  * @category predicates
  */
-export const isOctDigit = (c: string | number): boolean => {
+export const isOctDigit: (c: string | number) => boolean = codePointPredicate("isOctDigit", (c: string | number): boolean => {
   const x = code(c)
   return x >= 48 && x <= 55
-}
+})
 
 /**
  * `[0-9a-zA-Z]`
@@ -83,7 +87,7 @@ export const isOctDigit = (c: string | number): boolean => {
  * @since 0.1.0
  * @category predicates
  */
-export const isAlphanumeric = (c: string | number): boolean => isAlpha(c) || isDigit(c)
+export const isAlphanumeric: (c: string | number) => boolean = codePointPredicate("isAlphanumeric", (c: string | number): boolean => isAlpha(c) || isDigit(c))
 
 /**
  * `[ \t]`
@@ -91,10 +95,10 @@ export const isAlphanumeric = (c: string | number): boolean => isAlpha(c) || isD
  * @since 0.1.0
  * @category predicates
  */
-export const isSpace = (c: string | number): boolean => {
+export const isSpace: (c: string | number) => boolean = codePointPredicate("isSpace", (c: string | number): boolean => {
   const x = code(c)
   return x === 32 || x === 9
-}
+})
 
 /**
  * `[ \t\r\n]`
@@ -102,10 +106,10 @@ export const isSpace = (c: string | number): boolean => {
  * @since 0.1.0
  * @category predicates
  */
-export const isMultispace = (c: string | number): boolean => {
+export const isMultispace: (c: string | number) => boolean = codePointPredicate("isMultispace", (c: string | number): boolean => {
   const x = code(c)
   return x === 32 || x === 9 || x === 10 || x === 13
-}
+})
 
 /**
  * `\n`
@@ -113,7 +117,7 @@ export const isMultispace = (c: string | number): boolean => {
  * @since 0.1.0
  * @category predicates
  */
-export const isNewline = (c: string | number): boolean => code(c) === 10
+export const isNewline: (c: string | number) => boolean = codePointPredicate("isNewline", (c: string | number): boolean => code(c) === 10)
 
 // Token sets usable for both string and byte input
 const alphaSet = [range("a", "z"), range("A", "Z")]
@@ -324,7 +328,8 @@ const toText = (s: Input): string =>
 
 const latin1 = new TextDecoder("latin1")
 
-const overflow = (value: number): Result.Result<number, string> =>
+/** @internal */
+export const overflow = (value: number): Result.Result<number, string> =>
   Number.isSafeInteger(value) ? Result.succeed(value) : Result.fail("integer overflow")
 
 /**
@@ -397,7 +402,8 @@ const floatText = P.taken(P.alt(
   P.seq(sign, unsignedFloat)
 )).pipe(P.expected("number")) as Parser<string>
 
-const toFloat = (s: Input): number => {
+/** @internal */
+export const toFloat = (s: Input): number => {
   const t = toText(s).toLowerCase()
   const negative = t.startsWith("-")
   const body = t.startsWith("-") || t.startsWith("+") ? t.slice(1) : t
@@ -477,6 +483,20 @@ export const takeEscaped = <A, E, R, I extends Input, B, E2, R2, I2 extends Inpu
   escapable: Parser<B, E2, R2, I2>
 ): Parser<Slice<I & I2>, E | E2, R | R2, I & I2> => {
   const ctrl = controlCode(control)
+  return takeEscapedImpl(normal, (state) => {
+    if (!atControl(state, ctrl)) return false
+    state.pos++
+    return true
+  }, escapable, (state, start) => state.slice(start, state.pos) as Slice<I & I2>)
+}
+
+/** @internal */
+export const takeEscapedImpl = <A, E, R, I extends Input, B, E2, R2, I2 extends Input, S>(
+  normal: Parser<A, E, R, I>,
+  matchControl: (state: State<any>) => boolean,
+  escapable: Parser<B, E2, R2, I2>,
+  slice: (state: State<any>, start: number) => S
+): Parser<S, E | E2, R | R2, I & I2> => {
   const normalStep = normal.step
   const escStep = escapable.step
   return P.make((state: State<any>) => {
@@ -490,15 +510,14 @@ export const takeEscaped = <A, E, R, I extends Input, B, E2, R2, I2 extends Inpu
       }
       if (state.mode !== "Backtrack") return Fail
       state.pos = before
-      if (atControl(state, ctrl)) {
-        state.pos++
+      if (matchControl(state)) {
         if (escStep(state) === Fail) return Fail
       } else {
-        return state.slice(start, state.pos) as Slice<I & I2>
+        return slice(state, start)
       }
     }
     if (state.partial) return state.incomplete(0)
-    return state.slice(start, state.pos) as Slice<I & I2>
+    return slice(state, start)
   }, "takeEscaped")
 }
 
@@ -536,6 +555,19 @@ export const escaped = <E, R, I extends Input, E2, R2, I2 extends Input>(
   escape: Parser<string, E2, R2, I2>
 ): Parser<string, E | E2, R | R2, I & I2> => {
   const ctrl = controlCode(control)
+  return escapedImpl(normal, (state) => {
+    if (!atControl(state, ctrl)) return false
+    state.pos++
+    return true
+  }, escape)
+}
+
+/** @internal */
+export const escapedImpl = <E, R, I extends Input, E2, R2, I2 extends Input>(
+  normal: Parser<string, E, R, I>,
+  matchControl: (state: State<any>) => boolean,
+  escape: Parser<string, E2, R2, I2>
+): Parser<string, E | E2, R | R2, I & I2> => {
   const normalStep = normal.step
   const escStep = escape.step
   return P.make((state: State<any>) => {
@@ -544,19 +576,16 @@ export const escaped = <E, R, I extends Input, E2, R2, I2 extends Input>(
       const before = state.pos
       const a = normalStep(state)
       if (a !== Fail) {
-        if (state.pos === before) {
-          // `normal` matched nothing: fall through to the control character
-          if (!atControl(state, ctrl)) return out
-        } else {
+        if (state.pos !== before) {
           out += a
           continue
         }
+        // `normal` matched nothing: fall through to the control character
       } else {
         if (state.mode !== "Backtrack") return Fail
         state.pos = before
       }
-      if (atControl(state, ctrl)) {
-        state.pos++
+      if (matchControl(state)) {
         const b = escStep(state)
         if (b === Fail) return Fail
         out += b

@@ -54,6 +54,7 @@ effect-nom requires `effect` 4.x as a peer dependency.
 - [Errors](#errors)
 - [Streaming and partial input](#streaming-and-partial-input)
 - [Services](#services)
+- [Unicode text and encodings](#unicode-text-and-encodings)
 - [Modules](#modules)
 - [Coming from nom or winnow](#coming-from-nom-or-winnow)
 - [Examples](#examples)
@@ -277,12 +278,81 @@ Parser.parse(Parser.provideService(number, Radix, 16), "ff")      // 255
 Parser.parseEffect(number, "777").pipe(Effect.provideService(Radix, 8)) // Effect<511>
 ```
 
+## Unicode text and encodings
+
+`Token` reads strings by code point, but the `Ascii` character classes and
+numbers only cover ASCII, and they treat bytes as ASCII. The `Text` module
+adds Unicode parsers that work with any encoding. `Text.make(encoding)`
+builds a set of parsers (`Text.TextParsers<I>`), and sets are provided for
+the common encodings:
+
+| Parsers | Input | Offsets |
+|---|---|---|
+| `Text.string` | `string` | UTF-16 code units |
+| `Text.utf8` | `Uint8Array` | bytes |
+| `Text.utf16le`, `Text.utf16be` | `Uint8Array` | bytes |
+| `Text.latin1` | `Uint8Array` | bytes |
+
+Every set has the same members (`any`, `literal`, `caseless`, `oneOf`,
+`takeWhile`, `takeUntil`, `alpha1`, `digit1`, `space1`, `identifier`,
+`lineEnding`, `decInt`, `float`, `escaped`, `bom`, ...), and every parser
+returns `string`s. A grammar written once against `TextParsers<I>`
+therefore parses any of these inputs:
+
+```ts
+import { Encoding, Parser, Text } from "effect-nom"
+
+const assignment = <I extends string | Uint8Array>(T: Text.TextParsers<I>) =>
+  Parser.separatedPair(T.identifier, Parser.delimited(T.space0, T.literal("≔"), T.space0), T.decInt)
+
+Parser.parse(assignment(Text.string), "größe ≔ 42")                       // ["größe", 42]
+Parser.parse(assignment(Text.utf8), new TextEncoder().encode("größe ≔ 42")) // ["größe", 42]
+Parser.parse(assignment(Text.utf16le), Encoding.utf16le.encode("größe ≔ 42"))
+```
+
+- **Unicode classes.** `alpha1` matches `"Ωμέγα"`, `digit1` matches
+  `"١٢٣"`, `space1` matches a no-break space, and `identifier` follows UAX
+  #31. The predicates (`Text.isLetter`, `Text.isWhitespace`,
+  `Text.isIdStart`, ...) also work with `Token`, and `Text.property("Script=Greek")`
+  tests any Unicode property. Numbers (`decInt`, `float`) take ASCII digits
+  only, as most languages do.
+- **Bytes are decoded as they are parsed.** Offsets stay byte offsets, and
+  `Parser.taken` still returns a zero-copy `Uint8Array`. On partial input,
+  a character split across chunks reports `Incomplete`, so
+  `ParserStream.parseMany` parses a byte stream as text without decoding it
+  first.
+- **Decoding is strict.** Invalid UTF-8 and unpaired surrogates never match.
+  Errors on encoded bytes show the input as text:
+
+  ```text
+  Parse error at line 1, column 3 (byte 2):
+  1 | ab�c
+    |   ^
+  expected letter or end of input, found invalid UTF-8 0xff
+  ```
+
+- **Byte order marks.** `Encoding.sniff(bytes)` picks an encoding from a BOM,
+  and `T.bom` skips one.
+- **Custom encodings.** `Text.make` accepts any `Encoding.Encoding`: a
+  `decode` function plus a few properties.
+
+JavaScript strings are parsed natively, and the `Text` parsers only decode
+byte input. Converting strings to bytes up front would be slower: a
+`TextDecoder` call to produce each slice costs several times more than
+`String.prototype.slice`. `pnpm bench` compares the paths with a JSON grammar
+written once for every encoding ([`json-text.ts`](examples/json-text.ts)).
+In our runs `Text.string` was roughly 5–15% slower than the `Token`/`Ascii`
+parsers, and parsing UTF-8 directly was within about 10% of decoding it
+first.
+
 ## Modules
 
 | Module | Contents | winnow / nom equivalent |
 |---|---|---|
 | `Parser` | the type, combinators, runners | `Parser` trait, `combinator` / `combinator`, `branch`, `multi`, `sequence` |
 | `Token` | `any`, `literal`, `oneOf`, `noneOf`, `take`, `takeWhile`, `takeTill`, `takeUntil`, `rest`, `range` | `token` / `bytes` |
+| `Text` | Unicode parsers for any encoding: `string`, `utf8`, `utf16le`, `utf16be`, `latin1`, `make`; Unicode predicates | — |
+| `Encoding` | text encodings for `Text`, `sniff` | — |
 | `Ascii` | character classes, `lineEnding`, `decInt`, `decUint`, `hexUint`, `float`, `caseless`, `takeEscaped`, `escaped`, `Ascii.bytes.*` | `ascii` / `character`, `number` |
 | `Binary` | `u8`, `beU16` … `leI128`, floats, `lengthTake`, `lengthRepeat`, `lengthAndThen` | `binary` / `number`, `multi::length_*` |
 | `Bits` | `bits`, `bytes`, `take`, `takeBig`, `pattern`, `bool` | `binary::bits` / `bits` |
@@ -346,6 +416,8 @@ orders, for mechanical ports.
 in [`test/examples.test.ts`](test/examples.test.ts):
 
 - [`json.ts`](examples/json.ts): JSON with `dispatch`, `cut` and escapes
+- [`json-text.ts`](examples/json-text.ts): the same grammar written once
+  against `Text.TextParsers`, for strings, UTF-8 and UTF-16
 - [`arithmetic.ts`](examples/arithmetic.ts): direct evaluation, an AST via
   the Pratt parser, and a lexer plus a parser over the token array
 - [`ini.ts`](examples/ini.ts): INI files with a generator-style parser
@@ -354,7 +426,8 @@ in [`test/examples.test.ts`](test/examples.test.ts):
 - [`sexpr.ts`](examples/sexpr.ts): s-expressions with typed evaluation
   errors
 
-`pnpm build && pnpm bench` compares the JSON example with `JSON.parse`.
+`pnpm build && pnpm bench` compares the JSON examples, on each encoding,
+with `JSON.parse`.
 
 ## Design
 

@@ -555,6 +555,7 @@ export const mapParser: {
     const b = inner.step(sub)
     if (b === Fail) {
       const f = sub.failure
+      if (sub.encoding !== undefined) state.encoding = sub.encoding
       // The inner input is usually a slice ending where the outer parser stopped
       const base = Math.max(start, state.pos - a.length)
       const offset = Math.min(base + f.offset, state.pos)
@@ -2253,7 +2254,7 @@ const makeState = <I extends Input>(
 }
 
 const toError = <E>(state: State<any>): ParseError.ParseError<E> =>
-  ParseError.fromFailure<E>(state.input, state.reportedFailure(), state.mode)
+  ParseError.fromFailure<E>(state.input, state.reportedFailure(), state.mode, state.encoding)
 
 const runComplete = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
@@ -2480,7 +2481,7 @@ export const parseRecoverable: {
   const recovered: Array<Failure> = []
   state.recovered = recovered
   const result = runComplete(self, state)
-  const errors = recovered.map((f) => ParseError.fromFailure<E>(input, f, "Backtrack"))
+  const errors = recovered.map((f) => ParseError.fromFailure<E>(input, f, "Backtrack", state.encoding))
   if (Result.isSuccess(result)) return { value: Option.some(result.success), errors }
   errors.push(result.failure)
   return { value: Option.none(), errors }

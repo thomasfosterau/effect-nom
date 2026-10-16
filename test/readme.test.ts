@@ -1,6 +1,6 @@
 import { Context, Data, Effect, Option, Result, Stream } from "effect"
 import { expect, it } from "vitest"
-import { Ascii, Parser, ParserStream, Token } from "../src/index.js"
+import { Ascii, Encoding, Parser, ParserStream, Text, Token } from "../src/index.js"
 
 it("README examples behave as documented", () => {
   const point = Parser.gen(function*() {
@@ -55,4 +55,41 @@ it("README examples behave as documented", () => {
     return state.atEnd() ? state.eoi("Token", ["uppercase letter"], 1) : state.backtrack("Token", ["uppercase letter"])
   })
   expect(Parser.parseSync(Parser.repeat(upper), "AB")).toEqual(["A", "B"])
+})
+
+it("README Unicode examples behave as documented", () => {
+  const assignment = <I extends string | Uint8Array>(T: Text.TextParsers<I>) =>
+    Parser.separatedPair(T.identifier, Parser.delimited(T.space0, T.literal("≔"), T.space0), T.decInt)
+  const text = "größe ≔ 42"
+  expect(Parser.parse(assignment(Text.string), text)).toEqual(Result.succeed(["größe", 42]))
+  expect(Parser.parse(assignment(Text.utf8), new TextEncoder().encode(text))).toEqual(Result.succeed(["größe", 42]))
+  expect(Parser.parse(assignment(Text.utf16le), Encoding.utf16le.encode(text))).toEqual(Result.succeed(["größe", 42]))
+
+  const r = Parser.parse(Text.utf8.alpha1, new Uint8Array([0x61, 0x62, 0xff, 0x63]))
+  expect(Result.isFailure(r) && r.failure.message).toBe([
+    "Parse error at line 1, column 3 (byte 2):",
+    "1 | ab\ufffdc",
+    "  |   ^",
+    "expected letter or end of input, found invalid UTF-8 0xff"
+  ].join("\n"))
+})
+
+it("Text and Encoding doc examples behave as documented", () => {
+  const greeting = <I extends string | Uint8Array>(T: Text.TextParsers<I>) =>
+    Parser.preceded(T.literal("¡hola "), T.identifier)
+  expect(Parser.parse(greeting(Text.string), "¡hola mundo")).toEqual(Result.succeed("mundo"))
+  expect(Parser.parse(greeting(Text.utf8), new TextEncoder().encode("¡hola Zoë"))).toEqual(Result.succeed("Zoë"))
+
+  const bytes = new TextEncoder().encode("naïve café")
+  expect(Parser.parse(Parser.separatedPair(Text.utf8.alpha1, Text.utf8.space1, Text.utf8.alpha1), bytes))
+    .toEqual(Result.succeed(["naïve", "café"]))
+
+  const T = Text.make(Encoding.latin1)
+  expect(Parser.parse(T.alpha1, new Uint8Array([0x63, 0x61, 0x66, 0xe9]))).toEqual(Result.succeed("café"))
+
+  const greek = Text.string.takeWhile(Text.property("Script=Greek"), { min: 1 })
+  expect(Parser.parse(greek, "λόγος")).toEqual(Result.succeed("λόγος"))
+
+  expect(Encoding.sniff(new Uint8Array([0xff, 0xfe, 0x41, 0x00]))).toEqual(Option.some(Encoding.utf16le))
+  expect(Text.utf8.encoding).toBe(Encoding.utf8)
 })

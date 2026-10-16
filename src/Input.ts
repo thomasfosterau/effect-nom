@@ -13,6 +13,7 @@
  * @since 0.1.0
  */
 import * as Context from "effect/Context"
+import type { Encoding } from "./Encoding.js"
 import type { ErrorKind } from "./ParseError.js"
 
 /**
@@ -173,6 +174,11 @@ export class State<I extends Input = Input> {
   tracer: ((event: TraceEvent) => void) | undefined = undefined
   /** Current tracing depth. */
   depth = 0
+  /**
+   * The text encoding of a byte input, recorded by `Text` parsers when they
+   * fail so that errors can show the input as text.
+   */
+  encoding: Encoding<any> | undefined = undefined
 
   constructor(input: I, options?: {
     readonly partial?: boolean | undefined
