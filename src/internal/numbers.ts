@@ -40,8 +40,12 @@ export const floatText = <P extends object>(p: P): P => {
 /** The powers of ten that doubles represent exactly. */
 const exact = Array.from({ length: 23 }, (_, i) => Number(`1e${i}`))
 
-/** Where the latest successful scan ended. */
-export const floatScan = { end: 0 }
+/**
+ * Where the latest scan ended, when it succeeded, and the furthest offset it
+ * read (when it succeeded or failed): streaming builds re-run the parser
+ * when that is near the end of a partial input.
+ */
+export const floatScan = { end: 0, read: 0 }
 
 const isDigit = (c: number): boolean => c >= 48 && c <= 57
 
@@ -156,7 +160,10 @@ export const scanFloatString = (s: string, i: number, end: number): number | Fai
   } else {
     // "." must be followed by a digit
     c = ++i < end ? s.charCodeAt(i) : -1
-    if (!isDigit(c)) return Fail
+    if (!isDigit(c)) {
+      floatScan.read = i
+      return Fail
+    }
   }
   while (isDigit(c)) {
     if (digits < 15) {
@@ -174,6 +181,7 @@ export const scanFloatString = (s: string, i: number, end: number): number | Fai
     }
     c = ++i < end ? s.charCodeAt(i) : -1
   }
+  let read = i
   if (c === 101 || c === 69) {
     // The exponent is optional: without digits, it is not consumed
     let j = i + 1
@@ -190,8 +198,10 @@ export const scanFloatString = (s: string, i: number, end: number): number | Fai
       e10 += negative ? -e : e
       i = j
     }
+    read = j
   }
   floatScan.end = i
+  floatScan.read = read
   const negative = s.charCodeAt(start) === 45
   if (high === 0) return negative ? -0 : 0
   const v = digits > 19 ? undefined : decimal(negative, high, low, digits > 15 ? digits - 15 : 0, e10)
@@ -230,7 +240,10 @@ export const scanFloatBytes = (b: Uint8Array, i: number, end: number): number | 
     if (c === 46) c = ++i < end ? b[i]! : -1
   } else {
     c = ++i < end ? b[i]! : -1
-    if (!isDigit(c)) return Fail
+    if (!isDigit(c)) {
+      floatScan.read = i
+      return Fail
+    }
   }
   while (isDigit(c)) {
     if (digits < 15) {
@@ -248,6 +261,7 @@ export const scanFloatBytes = (b: Uint8Array, i: number, end: number): number | 
     }
     c = ++i < end ? b[i]! : -1
   }
+  let read = i
   if (c === 101 || c === 69) {
     let j = i + 1
     c = j < end ? b[j]! : -1
@@ -262,8 +276,10 @@ export const scanFloatBytes = (b: Uint8Array, i: number, end: number): number | 
       e10 += negative ? -e : e
       i = j
     }
+    read = j
   }
   floatScan.end = i
+  floatScan.read = read
   const negative = b[start] === 45
   if (high === 0) return negative ? -0 : 0
   const v = digits > 19 ? undefined : decimal(negative, high, low, digits > 15 ? digits - 15 : 0, e10)

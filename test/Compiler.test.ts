@@ -15,6 +15,7 @@ import { Ascii, Binary, Encoding, Expression, Parser, Text, Token } from "../src
 import { State } from "../src/Input.js"
 import { Fail } from "../src/Input.js"
 import * as Registry from "../src/internal/compiler/registry.js"
+import { allStrings, mutations, randomJson, rng } from "./generators.js"
 
 const backends = ["closure", "auto"] as const
 type Backend = typeof backends[number]
@@ -22,14 +23,6 @@ type Backend = typeof backends[number]
 // -----------------------------------------------------------------------------
 // Harness
 // -----------------------------------------------------------------------------
-
-/** A deterministic PRNG (mulberry32). */
-const rng = (seed: number) => () => {
-  seed = (seed + 0x6d2b79f5) | 0
-  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
-  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-  return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-}
 
 const errorFields = (e: any) => ({
   offset: e.offset,
@@ -74,6 +67,35 @@ const fast = (p: Parser.Parser.Any, input: Input.Input, context?: Context.Contex
   return a === Fail ? undefined : { value: a, pos: state.pos, end: state.end }
 }
 
+/**
+ * One step on a fresh state, interpreted (`step`) or with a resumable
+ * compiled build: the value and position, or the failure mode.
+ */
+const stepOutcome = (
+  step: ((state: State<any>) => unknown) | undefined,
+  input: Input.Input,
+  partial: boolean,
+  context: Context.Context<any> | undefined
+) => {
+  const state = new State(input, { partial, context })
+  if (step === undefined) return "missing"
+  const a = step(state)
+  return a === Fail ? { mode: state.mode } : { value: a, pos: state.pos }
+}
+
+/** The resumable build of a registered parser (as used by streaming parses). */
+const resumableStep = (p: Parser.Parser.Any, input: Input.Input) => {
+  const kind = new State(input).inputKind
+  const compiled = Registry.compiled(p, kind, true)!
+  if (compiled.error !== undefined) throw compiled.error
+  if (compiled.jitError !== undefined) throw compiled.jitError
+  const step = compiled.step!
+  return (state: State<any>) => {
+    state.resume = new Map()
+    return step(state)
+  }
+}
+
 let checked = 0
 
 /** Checks that `p` gives the same results compiled and interpreted on `input`. */
@@ -90,73 +112,14 @@ const same = (p: Parser.Parser.Any, input: Input.Input, context?: Context.Contex
     const f = fast(c, input, context)
     expect(f !== undefined, `${label}: compiled success`).toBe(expectedPeek.ok)
     if (f !== undefined && expected.ok) expect(f.pos, label).toBe(f.end)
+    // The resumable build agrees with the interpreter on partial and on complete input
+    const resumable = resumableStep(c, input)
+    for (const partial of [true, false]) {
+      expect(stepOutcome(resumable, input, partial, context), `${label}, resumable, partial: ${partial}`)
+        .toEqual(stepOutcome(p.step, input, partial, context))
+    }
     checked++
   }
-}
-
-/** Random mutations of a valid input: deletions, insertions, replacements and truncations. */
-const mutations = (doc: string, alphabet: string, count: number, seed: number): Array<string> => {
-  const random = rng(seed)
-  const chars = Array.from(alphabet)
-  const out: Array<string> = []
-  for (let i = 0; i < count; i++) {
-    const at = Math.floor(random() * (doc.length + 1))
-    const c = chars[Math.floor(random() * chars.length)]!
-    switch (i % 4) {
-      case 0:
-        out.push(doc.slice(0, at) + doc.slice(at + 1))
-        break
-      case 1:
-        out.push(doc.slice(0, at) + c + doc.slice(at))
-        break
-      case 2:
-        out.push(doc.slice(0, at) + c + doc.slice(at + 1))
-        break
-      default:
-        out.push(doc.slice(0, at))
-    }
-  }
-  return out
-}
-
-/** Every string over `alphabet` up to length `max`. */
-const allStrings = (alphabet: ReadonlyArray<string>, max: number): Array<string> => {
-  const out: Array<string> = [""]
-  let layer = [""]
-  for (let n = 1; n <= max; n++) {
-    layer = layer.flatMap((s) => alphabet.map((c) => s + c))
-    out.push(...layer)
-  }
-  return out
-}
-
-// -----------------------------------------------------------------------------
-// Generators
-// -----------------------------------------------------------------------------
-
-const randomJson = (random: () => number, depth = 0): string => {
-  const ws = () => [" ", "", "\n  ", "\t", ""][Math.floor(random() * 5)]!
-  const pick = random()
-  if (depth > 3 || pick < 0.45) {
-    const atoms = [
-      () => String(Math.floor(random() * 2000) - 1000),
-      () => (random() * 100).toFixed(3),
-      () => `${Math.floor(random() * 9)}e${Math.floor(random() * 20) - 10}`,
-      () => "-0.5E+3",
-      () => "true",
-      () => "false",
-      () => "null",
-      () => JSON.stringify(["abc", "é", "😀 x", "\"q\"", "\\", "\n\t", "\u0001", ""][Math.floor(random() * 8)]),
-      () => "\"\\u00e9\\ud83d\\ude00\\/\\b\""
-    ]
-    return atoms[Math.floor(random() * atoms.length)]!()
-  }
-  const n = Math.floor(random() * 4)
-  if (pick < 0.75) {
-    return `[${ws()}${Array.from({ length: n }, () => randomJson(random, depth + 1)).join(`${ws()},${ws()}`)}${ws()}]`
-  }
-  const members = Array.from({ length: n }, (_, i) => `${JSON.stringify(`k${i}é`)}${ws()}:${ws()}${randomJson(random, depth + 1)}`)
-  return `{${ws()}${members.join(`${ws()},${ws()}`)}${ws()}}`
 }
 
 const jsonAlphabet = "{}[],:\"\\0123456789.eE+-tfnulrsa \n\tuéx😀"
