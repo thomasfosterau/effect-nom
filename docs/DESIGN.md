@@ -439,7 +439,20 @@ and token-set predicates may be cached per character.
    error bound (2^-96, relative) round to it; anything else with `Number`
    on the text. The value is always `Number`'s. `nan`, `inf` and failures
    before a digit run the compiled parser.
-6. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
+6. **Objects.** `map(p, Object.fromEntries)` (which `Parser.fromEntries`
+   is) builds its object directly when `p` is a `repeat` or `separated` of
+   a pair (`separatedPair`, a two-element `seq`), possibly inside `cut`,
+   diagnostics and the kept element of `preceded`, `terminated` or
+   `delimited`: each entry is assigned as it is parsed, with no pairs and
+   no array. `o[key] = value` creates the same property as
+   `Object.fromEntries` when the key is a string that `Object.prototype`
+   has no property for (no `__proto__` setter, no read-only property under
+   a frozen prototype); other keys are defined with
+   `Object.defineProperty`, and from the first object key on (whose
+   conversion may run code) entries are deferred to the end, in order, as
+   `Object.fromEntries` converts them after the whole list is parsed
+   (`internal/entries.ts`).
+7. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
    elements of `preceded`/`terminated`/`delimited`/`separatedPair`, `as`,
    `asVoid` and `opt` in void position compile without building their
    values. `Seq` and `Struct` build their results directly.
