@@ -26,8 +26,8 @@
 import * as Effect from "effect/Effect"
 import { dual } from "effect/Function"
 import * as Stream from "effect/Stream"
-import type { Input } from "./Input.js"
-import { Fail, Failure, State } from "./Input.js"
+import type { Input, Source } from "./Input.js"
+import { Fail, Failure, fromSource, State } from "./Input.js"
 import * as ParseError from "./ParseError.js"
 import type { Parser } from "./Parser.js"
 
@@ -88,7 +88,7 @@ const noProgress = (input: Input, offset: number) =>
  */
 export interface ParseManyOptions<I> {
   /** The empty input, used to initialise the buffer (inferred from the first chunk if omitted). */
-  readonly empty?: I | undefined
+  readonly empty?: Source<I> | undefined
 }
 
 /**
@@ -106,20 +106,20 @@ export const parseMany: {
   <A, E, R, I extends Chunkable>(
     parser: Parser<A, E, R, I>,
     options?: ParseManyOptions<I>
-  ): <E0, R0>(self: Stream.Stream<I, E0, R0>) => Stream.Stream<A, E0 | ParseError.ParseError<E>, R0 | R>
+  ): <E0, R0>(self: Stream.Stream<Source<I>, E0, R0>) => Stream.Stream<A, E0 | ParseError.ParseError<E>, R0 | R>
   <I extends Chunkable, E0, R0, A, E, R>(
-    self: Stream.Stream<I, E0, R0>,
+    self: Stream.Stream<Source<NoInfer<I>>, E0, R0>,
     parser: Parser<A, E, R, I>,
     options?: ParseManyOptions<I>
   ): Stream.Stream<A, E0 | ParseError.ParseError<E>, R0 | R>
 } = dual((args) => Stream.isStream(args[0]), <I extends Chunkable, E0, R0, A, E, R>(
-  self: Stream.Stream<I, E0, R0>,
+  self: Stream.Stream<Source<I>, E0, R0>,
   parser: Parser<A, E, R, I>,
   options?: ParseManyOptions<I>
 ): Stream.Stream<A, E0 | ParseError.ParseError<E>, R0 | R> =>
   Stream.suspend(() => {
     const step = parser.step
-    let buffer: I | undefined = options?.empty
+    let buffer: I | undefined = options?.empty === undefined ? undefined : fromSource<I>(options.empty)
 
     const drain = (
       context: any,
@@ -144,9 +144,10 @@ export const parseMany: {
       return Effect.succeed(out)
     }
 
-    const feed = (chunk: I) =>
+    const feed = (source: Source<I>) =>
       Effect.flatMap(Effect.context<R>(), (context) =>
         Effect.suspend(() => {
+          const chunk = fromSource<I>(source)
           buffer = buffer === undefined ? chunk : concat(buffer, chunk)
           return drain(context, true)
         }))
@@ -170,14 +171,14 @@ export const parseAll: {
   <A, E, R, I extends Chunkable>(
     parser: Parser<A, E, R, I>,
     options?: ParseManyOptions<I>
-  ): <E0, R0>(self: Stream.Stream<I, E0, R0>) => Effect.Effect<A, E0 | ParseError.ParseError<E>, R0 | R>
+  ): <E0, R0>(self: Stream.Stream<Source<I>, E0, R0>) => Effect.Effect<A, E0 | ParseError.ParseError<E>, R0 | R>
   <I extends Chunkable, E0, R0, A, E, R>(
-    self: Stream.Stream<I, E0, R0>,
+    self: Stream.Stream<Source<NoInfer<I>>, E0, R0>,
     parser: Parser<A, E, R, I>,
     options?: ParseManyOptions<I>
   ): Effect.Effect<A, E0 | ParseError.ParseError<E>, R0 | R>
 } = dual((args) => Stream.isStream(args[0]), <I extends Chunkable, E0, R0, A, E, R>(
-  self: Stream.Stream<I, E0, R0>,
+  self: Stream.Stream<Source<I>, E0, R0>,
   parser: Parser<A, E, R, I>,
   options?: ParseManyOptions<I>
 ): Effect.Effect<A, E0 | ParseError.ParseError<E>, R0 | R> =>
@@ -186,7 +187,10 @@ export const parseAll: {
     (chunks) =>
       Effect.flatMap(Effect.context<R>(), (context) =>
         Effect.suspend(() => {
-          const all = join(chunks, options?.empty)
+          const all = join(
+            Array.from(chunks, (c) => fromSource<I>(c)),
+            options?.empty === undefined ? undefined : fromSource<I>(options.empty)
+          )
           const state = new State(all, { context })
           const a = parser.step(state)
           if (a === Fail) return Effect.fail(ParseError.fromFailure<E>(all, state.reportedFailure(), state.mode, state.encoding))

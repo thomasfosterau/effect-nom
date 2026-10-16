@@ -38,7 +38,7 @@ import type { Pipeable } from "effect/Pipeable"
 import { pipeArguments } from "effect/Pipeable"
 import * as Result from "effect/Result"
 import type { Contravariant, Covariant, Simplify } from "effect/Types"
-import type { ErrMode, Input, Slice, TraceEvent } from "./Input.js"
+import type { ErrMode, Input, Slice, Source, TraceEvent } from "./Input.js"
 import { Fail, Failure, mergeExpected, mergeFailures, State } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
 import * as ParseError from "./ParseError.js"
@@ -2243,7 +2243,7 @@ export interface ParseOptionsWithContext<R> extends ParseOptions {
 }
 
 const makeState = <I extends Input>(
-  input: I,
+  input: I | Source<I>,
   options: (ParseOptions & { readonly context?: Context.Context<any> }) | undefined,
   partial: boolean
 ): State<I> => {
@@ -2288,17 +2288,17 @@ const runComplete = <A, E, R, I extends Input>(
 export const parse: {
   <A, E, I extends Input>(
     self: Parser<A, E, never, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options?: ParseOptions
   ): Result.Result<A, ParseError.ParseError<E>>
   <A, E, R, I extends Input>(
     self: Parser<A, E, R, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options: ParseOptionsWithContext<R>
   ): Result.Result<A, ParseError.ParseError<E>>
 } = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
-  input: I,
+  input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
 ): Result.Result<A, ParseError.ParseError<E>> => runComplete(self, makeState(input, options, false))
 
@@ -2309,11 +2309,11 @@ export const parse: {
  * @category running
  */
 export const parseSync: {
-  <A, E, I extends Input>(self: Parser<A, E, never, I>, input: NoInfer<I>, options?: ParseOptions): A
-  <A, E, R, I extends Input>(self: Parser<A, E, R, I>, input: NoInfer<I>, options: ParseOptionsWithContext<R>): A
+  <A, E, I extends Input>(self: Parser<A, E, never, I>, input: NoInfer<Source<I>>, options?: ParseOptions): A
+  <A, E, R, I extends Input>(self: Parser<A, E, R, I>, input: NoInfer<Source<I>>, options: ParseOptionsWithContext<R>): A
 } = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
-  input: I,
+  input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
 ): A => {
   const result = runComplete(self, makeState(input, options, false))
@@ -2332,17 +2332,17 @@ export const parseSync: {
 export const parsePeek: {
   <A, E, I extends Input>(
     self: Parser<A, E, never, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options?: ParseOptions
   ): Result.Result<[remaining: Slice<I>, output: A], ParseError.ParseError<E>>
   <A, E, R, I extends Input>(
     self: Parser<A, E, R, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options: ParseOptionsWithContext<R>
   ): Result.Result<[remaining: Slice<I>, output: A], ParseError.ParseError<E>>
 } = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
-  input: I,
+  input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
 ): Result.Result<[remaining: Slice<I>, output: A], ParseError.ParseError<E>> => {
   const state = makeState(input, options, false)
@@ -2389,17 +2389,17 @@ export type PartialResult<A> =
 export const parsePartial: {
   <A, E, I extends Input>(
     self: Parser<A, E, never, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options?: ParseOptions
   ): Result.Result<PartialResult<A>, ParseError.ParseError<E>>
   <A, E, R, I extends Input>(
     self: Parser<A, E, R, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options: ParseOptionsWithContext<R>
   ): Result.Result<PartialResult<A>, ParseError.ParseError<E>>
 } = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
-  input: I,
+  input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
 ): Result.Result<PartialResult<A>, ParseError.ParseError<E>> => {
   const state = makeState(input, options, true)
@@ -2432,7 +2432,7 @@ export const parsePartial: {
  */
 export const parseEffect = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
-  input: NoInfer<I>,
+  input: NoInfer<Source<I>>,
   options?: ParseOptions
 ): Effect.Effect<A, ParseError.ParseError<E>, R> =>
   Effect.flatMap(
@@ -2464,24 +2464,24 @@ export interface RecoverableResult<A, E> {
 export const parseRecoverable: {
   <A, E, I extends Input>(
     self: Parser<A, E, never, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options?: ParseOptions
   ): RecoverableResult<A, E>
   <A, E, R, I extends Input>(
     self: Parser<A, E, R, I>,
-    input: NoInfer<I>,
+    input: NoInfer<Source<I>>,
     options: ParseOptionsWithContext<R>
   ): RecoverableResult<A, E>
 } = <A, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
-  input: I,
+  input: I | Source<I>,
   options?: ParseOptions & { readonly context?: Context.Context<R> }
 ): RecoverableResult<A, E> => {
   const state = makeState(input, options, false)
   const recovered: Array<Failure> = []
   state.recovered = recovered
   const result = runComplete(self, state)
-  const errors = recovered.map((f) => ParseError.fromFailure<E>(input, f, "Backtrack", state.encoding))
+  const errors = recovered.map((f) => ParseError.fromFailure<E>(state.input, f, "Backtrack", state.encoding))
   if (Result.isSuccess(result)) return { value: Option.some(result.success), errors }
   errors.push(result.failure)
   return { value: Option.none(), errors }

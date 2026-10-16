@@ -96,6 +96,15 @@ const decodeUtf8 = (b: Uint8Array, i: number, end: number): number => {
 const SHORT = 24
 
 const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true })
+
+/**
+ * Decodes `b[start, end)`. Some platforms' `TextDecoder` rejects views of a
+ * `SharedArrayBuffer`, so those are copied first.
+ */
+const decodeRange = (decoder: TextDecoder, b: Uint8Array, start: number, end: number): string => {
+  const view = b.subarray(start, end)
+  return decoder.decode(b.buffer instanceof ArrayBuffer ? view : view.slice())
+}
 const utf8Encoder = new TextEncoder()
 
 /** UTF-8 bytes. */
@@ -107,7 +116,7 @@ export const utf8: Encoding<Uint8Array> = {
   width: (cp) => cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4,
   encode: (text) => utf8Encoder.encode(text),
   text: (b, start, end) => {
-    if (end - start > SHORT) return utf8Decoder.decode(b.subarray(start, end))
+    if (end - start > SHORT) return decodeRange(utf8Decoder, b, start, end)
     let out = ""
     for (let i = start; i < end;) {
       const c = b[i]!
@@ -159,7 +168,7 @@ const makeUtf16 = (littleEndian: boolean): Encoding<Uint8Array> => {
         return out
       }
       decoder ??= new TextDecoder(littleEndian ? "utf-16le" : "utf-16be", { ignoreBOM: true })
-      return decoder.decode(b.subarray(start, end))
+      return decodeRange(decoder, b, start, end)
     }
   }
 }

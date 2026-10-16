@@ -99,6 +99,20 @@ winnow forked from nom and changed a few things that matter here:
 Offsets are UTF-16 code-unit indices for strings, byte indices for
 `Uint8Array`, and element indices for arrays.
 
+**Binary data** (`ArrayBuffer`, `SharedArrayBuffer`, `DataView`, other
+typed arrays) is a *source*, not another input kind. The runners,
+`ParserStream` and the `State` constructor accept it wherever the parser
+reads a `Uint8Array` (`Input.Source<I>`), and view it as a `Uint8Array` of
+the same memory. A separate `ArrayBuffer` input kind would add nothing:
+indexing an `ArrayBuffer` needs a view anyway, and slicing one copies. With
+a view, slices stay zero-copy `subarray`s and every byte parser works
+unchanged. A view of a resizable buffer is given a fixed length, so the
+input can't change size during a parse. Typed arrays with wider elements are
+viewed in platform byte order: a `Uint16Array` of UTF-16 code units is
+UTF-16LE on all common platforms. `TextDecoder` is never given a view of a
+`SharedArrayBuffer` directly (some browsers reject it); such slices are
+copied first.
+
 When a token parser could work on several input kinds, it takes a type
 parameter that defaults to `string`, much like Rust's turbofish:
 `Token.take<Uint8Array>(4)`. When the input kind can be inferred from an

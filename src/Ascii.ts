@@ -27,6 +27,7 @@ import { Fail } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
 import type { Parser } from "./Parser.js"
 import * as P from "./Parser.js"
+import { latin1 } from "./internal/text.js"
 import { codePointPredicate } from "./internal/tokens.js"
 import { literalImpl, range, takeWhileImpl } from "./Token.js"
 import * as Token from "./Token.js"
@@ -324,9 +325,8 @@ export const tillLineEnding: Parser<string> = P.make<string>((state: State<any>)
 // -----------------------------------------------------------------------------
 
 const toText = (s: Input): string =>
-  typeof s === "string" ? s : s instanceof Uint8Array ? latin1.decode(s) : s.join("")
+  typeof s === "string" ? s : s instanceof Uint8Array ? latin1.text(s, 0, s.length) : s.join("")
 
-const latin1 = new TextDecoder("latin1")
 
 /** @internal */
 export const overflow = (value: number): Result.Result<number, string> =>

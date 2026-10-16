@@ -185,6 +185,23 @@ times, `Parser.repeat(p, 3)` exactly three times, and
 | `ParserStream.parseMany(p)` | `Stream<I> => Stream<A>` (see [Streaming](#streaming-and-partial-input)) |
 | `ParserSchema.make(p)` | a `Schema` decoding strings with the parser |
 
+Parsers over bytes (`Uint8Array`) also accept an `ArrayBuffer`, a
+`SharedArrayBuffer`, a `DataView` or any other typed array, in the runners
+and as `ParserStream` chunks. The data is viewed as a `Uint8Array` of the
+same memory, not copied, so offsets are byte offsets and slices are
+`Uint8Array`s:
+
+```ts
+const response = await fetch(url)
+Parser.parse(Text.utf8.rest, await response.arrayBuffer())
+Parser.parse(Binary.beU32, new DataView(buffer, 4))
+```
+
+Wider typed arrays are viewed in the platform's byte order, which is little
+endian on all common platforms. So a `Uint16Array` of UTF-16 code units can
+be parsed with `Text.utf16le`. `Input.fromSource` performs the same
+conversion.
+
 ## Errors
 
 Failures have a mode, as in winnow:
@@ -333,6 +350,8 @@ Parser.parse(assignment(Text.utf16le), Encoding.utf16le.encode("größe ≔ 42")
 
 - **Byte order marks.** `Encoding.sniff(bytes)` picks an encoding from a BOM,
   and `T.bom` skips one.
+- **Binary data.** The byte parsers accept `ArrayBuffer`s, `DataView`s and
+  typed arrays too (see [Running parsers](#running-parsers)).
 - **Custom encodings.** `Text.make` accepts any `Encoding.Encoding`: a
   `decode` function plus a few properties.
 
