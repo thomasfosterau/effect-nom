@@ -9,6 +9,7 @@ import * as Arithmetic from "../examples/arithmetic.js"
 import * as Http from "../examples/http.js"
 import * as Ini from "../examples/ini.js"
 import * as Json from "../examples/json.js"
+import * as JsonFast from "../examples/json-fast.js"
 import { makeJson } from "../examples/json-text.js"
 import * as Sexpr from "../examples/sexpr.js"
 import type { Input } from "../src/index.js"
@@ -89,6 +90,14 @@ describe("streaming parses", () => {
     ["Text.utf16le", Text.utf16le]
   ] as const)("json-text with %s", (_, T) => {
     const p = makeJson(T as Text.TextParsers<any>)
+    jsonDocs.forEach((doc, i) => same(p, (T.encoding as Encoding.Encoding<any>).encode(doc), i))
+  })
+
+  it.each([
+    ["Text.string", Text.string],
+    ["Text.utf8", Text.utf8]
+  ] as const)("json-fast with %s (objects built with fromEntries)", (_, T) => {
+    const p = JsonFast.makeJson(T as Text.TextParsers<any>)
     jsonDocs.forEach((doc, i) => same(p, (T.encoding as Encoding.Encoding<any>).encode(doc), i))
   })
 

@@ -12,11 +12,14 @@ import type { ErrMode, State } from "../../Input.js"
 import { Fail } from "../../Input.js"
 import * as Option from "effect/Option"
 import type { Node, NodeOf, ParserLike } from "../node.js"
+import { addEntry, flushEntries, fromEntries, isPlainKey } from "../entries.js"
 import { nodeOf } from "../node.js"
+import { floatScan, floatTexts, scanFloatBytes, scanFloatString, toFloat } from "../numbers.js"
 import { charOf, fastLimit, fold, validate } from "../text.js"
 import { countTokens, indexOf } from "../tokens.js"
 import type { AltPlan } from "./first.js"
 import * as Resume from "../resume.js"
+import { entriesShape, pairOf } from "./entries.js"
 import { FirstSets, planAlt } from "./first.js"
 import type { CharSet } from "./sets.js"
 import { kindOfEncoding, TableSize, textSet, tokenSet } from "./sets.js"
@@ -184,6 +187,12 @@ class Compiler {
         return this.escaped(node)
       case "Map": {
         if (!used) return this.compile(node.self, false)
+        if (node.f === toFloat) {
+          const step = this.float(node)
+          if (step !== undefined) return step
+        }
+        // Streaming builds keep the array, which their checkpoints hold
+        if (node.f === fromEntries && !this.resumable && entriesShape(node.self)) return this.entries(node.self)
         const c = this.compile(node.self, true)
         const f = node.f
         return (s) => {
@@ -630,6 +639,128 @@ class Compiler {
         acc = add(acc, a)
       }
       return resumed ? Resume.done(s, key, entry, true, acc) : acc
+    }
+  }
+
+  /**
+   * `map(self, Object.fromEntries)`, where `entriesShape(self)`: builds the
+   * object directly (see the JIT).
+   */
+  private entries(p: ParserLike): Step {
+    const node = nodeOf(p)
+    switch (node._tag) {
+      case "Mode": {
+        const c = this.entries(node.self)
+        const from = node.from
+        const to = node.to
+        return (s) => {
+          const a = c(s)
+          if (a === Fail && s.mode === from) s.mode = to
+          return a
+        }
+      }
+      case "Seq": {
+        const i = node.output as number
+        const steps = node.parsers.map((q, j) => j === i ? this.entries(q) : this.compile(q, false))
+        return (s) => {
+          let out: unknown
+          for (let j = 0; j < steps.length; j++) {
+            const a = steps[j]!(s)
+            if (a === Fail) return Fail
+            if (j === i) out = a
+          }
+          return out
+        }
+      }
+      case "Repeat":
+      case "Separated":
+        return this.entriesLoop(node)
+      default:
+        return this.entries((node as { readonly self: ParserLike }).self)
+    }
+  }
+
+  private entriesLoop(node: NodeOf<"Repeat"> | NodeOf<"Separated">): Step {
+    const pair = pairOf(node.self)!
+    const parts = pair.parsers.map((q, j) => this.compile(q, j === pair.key || j === pair.value))
+    const { key: ki, value: vi } = pair
+    // Parses an entry and adds it to `acc`
+    const entry = (s: State<any>, acc: EntriesAcc): boolean => {
+      let key: unknown
+      let value: unknown
+      for (let j = 0; j < parts.length; j++) {
+        const a = parts[j]!(s)
+        if (a === Fail) return false
+        if (j === ki) key = a
+        else if (j === vi) value = a
+      }
+      acc.add(key, value)
+      return true
+    }
+    const { max, min } = node
+    const checkLoop = max === Infinity
+    if (node._tag === "Repeat") {
+      return (s) => {
+        const acc = new EntriesAcc()
+        for (let count = 0; count < max; count++) {
+          const start = s.pos
+          let key: unknown
+          let value: unknown
+          let ok = true
+          for (let j = 0; j < parts.length; j++) {
+            const a = parts[j]!(s)
+            if (a === Fail) {
+              ok = false
+              break
+            }
+            if (j === ki) key = a
+            else if (j === vi) value = a
+          }
+          if (!ok) {
+            if (s.mode !== BT || count < min) return Fail
+            s.pos = start
+            return acc.result()
+          }
+          if (checkLoop && s.pos === start) {
+            s.mode = CUT
+            return Fail
+          }
+          acc.add(key, value)
+        }
+        return acc.result()
+      }
+    }
+    const sep = this.compile(node.separator, false)
+    return (s) => {
+      const acc = new EntriesAcc()
+      let count = 0
+      if (max === 0) return acc.result()
+      let start = s.pos
+      if (!entry(s, acc)) {
+        if (s.mode !== BT || min > 0) return Fail
+        s.pos = start
+        return acc.result()
+      }
+      count++
+      while (count < max) {
+        start = s.pos
+        if (sep(s) === Fail) {
+          if (s.mode !== BT || count < min) return Fail
+          s.pos = start
+          return acc.result()
+        }
+        if (checkLoop && s.pos === start) {
+          s.mode = CUT
+          return Fail
+        }
+        if (!entry(s, acc)) {
+          if (s.mode !== BT || count < min) return Fail
+          s.pos = start
+          return acc.result()
+        }
+        count++
+      }
+      return acc.result()
     }
   }
 
@@ -1209,6 +1340,34 @@ class Compiler {
     }
   }
 
+  /**
+   * `Ascii.float` and `Text.float` (`map(floatText, toFloat)`): numbers in
+   * decimal notation are matched and converted in one pass, without
+   * slicing the input; the rest runs the compiled parser (see the JIT).
+   */
+  private float(node: NodeOf<"Map">): Step | undefined {
+    if (!floatTexts.has(node.self) || this.kind === 2) return undefined
+    let taken = nodeOf(node.self)
+    while (taken._tag === "Expected") taken = nodeOf(taken.self)
+    if (taken._tag !== "Taken") return undefined
+    const enc = taken.encoding
+    if (enc !== undefined && !(this.native(enc) && enc.unit === 1 && enc.asciiCompatible)) return undefined
+    const c = this.compile(node.self, true)
+    const scan = (this.kind === 0 ? scanFloatString : scanFloatBytes) as (input: unknown, i: number, end: number) => unknown
+    const resumable = this.resumable
+    return (s) => {
+      const v = scan(s.input, s.pos, s.end)
+      // Near the end of a partial input, the parser may have to report `Incomplete`
+      if (v === undefined || (resumable && s.partial && floatScan.read + Margin > s.end)) {
+        const t = c(s)
+        return t === Fail ? Fail : toFloat(t)
+      }
+      if (v === Fail) return fail(s)
+      s.pos = floatScan.end
+      return v
+    }
+  }
+
   escaped(node: NodeOf<"Escaped">): Step {
     const raw = node.raw
     const normal = this.compile(node.normal, !raw)
@@ -1381,6 +1540,20 @@ const stringLiteral = (str: string, value: unknown): Step => {
 }
 
 /** A closure compiler for one input kind; it memoizes what it compiles. */
+/** The object of `Object.fromEntries`, built an entry at a time (see `internal/entries.ts`). */
+class EntriesAcc {
+  readonly o: Record<string, unknown> = {}
+  deferred: Array<unknown> | undefined = undefined
+  add(key: unknown, value: unknown): void {
+    if (this.deferred === undefined && isPlainKey(key)) this.o[key] = value
+    else this.deferred = addEntry(this.o, this.deferred, key, value)
+  }
+  result(): object {
+    if (this.deferred !== undefined) flushEntries(this.o, this.deferred)
+    return this.o
+  }
+}
+
 export interface ClosureCompiler {
   readonly compile: (p: ParserLike, used: boolean) => Step
   readonly note: (p: ParserLike, node: Node, reason: string) => void

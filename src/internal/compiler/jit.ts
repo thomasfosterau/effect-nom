@@ -19,15 +19,18 @@ import type { Encoding } from "../../Encoding.js"
 import type { State } from "../../Input.js"
 import { Fail } from "../../Input.js"
 import type { Node, NodeOf, ParserLike } from "../node.js"
+import { addEntry, flushEntries, fromEntries, isPlainKey } from "../entries.js"
 import { children, nodeOf } from "../node.js"
+import { floatScan, floatTexts, scanFloatBytes, scanFloatString, toFloat } from "../numbers.js"
 import * as Resume from "../resume.js"
-import { charOf, fastLimit, utf16be, utf16le, validate } from "../text.js"
+import { charOf, fastLimit, latin1, string, utf16be, utf16le, utf8, validate } from "../text.js"
 import type { ClosureCompiler, Fallback, Step } from "./closure.js"
 import { createClosureCompiler } from "./closure.js"
+import { entriesShape, pairOf } from "./entries.js"
 import type { First } from "./first.js"
 import { planAlt, Strict } from "./first.js"
 import type { CharSet } from "./sets.js"
-import { kindOfEncoding, TableSize, textSet, tokenSet } from "./sets.js"
+import { kindOfEncoding, reachesAbove, TableSize, textSet, tokenSet } from "./sets.js"
 
 /** Helpers available to generated code as `R`. */
 const runtime = {
@@ -40,6 +43,11 @@ const runtime = {
   some: Option.some,
   none: Option.none,
   charOf,
+  scanFloatString,
+  scanFloatBytes,
+  isPlainKey,
+  addEntry,
+  flushEntries,
   /** `Text.taken`: the text of `[start, end)`, or `Fail` if it is malformed. */
   textOf: (enc: Encoding<any>, fast: number, s: State<any>, start: number, end: number): unknown => {
     const input = s.input
@@ -74,6 +82,8 @@ export const jitSupported = (): boolean => {
 }
 
 const BT = `$S.mode="Backtrack";`
+
+const builtinEncodings: ReadonlySet<Encoding<any>> = new Set([string, utf8, utf16le, utf16be, latin1])
 
 /** How many units past the cursor a single token can depend on (see the closure compiler). */
 const Margin = 4
@@ -129,6 +139,59 @@ const rangeTest = (runs: ReadonlyArray<readonly [number, number]>, v: string): s
   if (runs.length === 0) return "false"
   if (runs.length > 4) return undefined
   return runs.map(([a, b]) => a === b ? `${v}===${a}` : `(${v}>=${a}&&${v}<=${b})`).join("||")
+}
+
+/** The inclusive ranges of `[0, size)` where `table[c] === value`. */
+const runsWhere = (table: Uint8Array, size: number, value: 0 | 1): Array<[number, number]> => {
+  const out: Array<[number, number]> = []
+  for (let i = 0; i < size; i++) {
+    if (table[i] !== value) continue
+    let j = i
+    while (j + 1 < size && table[j + 1] === value) j++
+    out.push([i, j])
+    i = j
+  }
+  return out
+}
+
+/** How many comparisons it takes to test a run of `[0, size)`. */
+const runCost = ([a, b]: readonly [number, number], size: number): number =>
+  a === b || a === 0 || b === size - 1 ? 1 : 2
+
+/**
+ * A JavaScript expression testing whether `v`, known to be in `[0, size)`,
+ * is accepted by `table`, or `undefined` if that takes too many comparisons.
+ * It tests the accepted runs or the rejected ones, whichever is cheaper:
+ * `c!==34&&c!==92&&c>=32` rather than three two-sided ranges.
+ */
+const tableTest = (table: Uint8Array, v: string, size: number): string | undefined => {
+  const accept = runsWhere(table, size, 1)
+  const reject = runsWhere(table, size, 0)
+  if (accept.length === 0) return "false"
+  if (reject.length === 0) return "true"
+  const cost = (runs: ReadonlyArray<readonly [number, number]>) => runs.reduce((n, r) => n + runCost(r, size), 0)
+  const acceptCost = cost(accept)
+  const rejectCost = cost(reject)
+  if (Math.min(acceptCost, rejectCost) > 6) return undefined
+  const terms = acceptCost <= rejectCost
+    ? accept.map(([a, b]) =>
+      a === b ? `${v}===${a}` : a === 0 ? `${v}<=${b}` : b === size - 1 ? `${v}>=${a}` : `(${v}>=${a}&&${v}<=${b})`
+    ).join("||")
+    : reject.map(([a, b]) =>
+      a === b ? `${v}!==${a}` : a === 0 ? `${v}>${b}` : b === size - 1 ? `${v}<${a}` : `(${v}<${a}||${v}>${b})`
+    ).join("&&")
+  return `(${terms})`
+}
+
+/**
+ * A repetition that builds its own result (see `Emitter.entries`): `init`
+ * starts it, `element(fail, check)` parses one element, runs `check` (the
+ * repetition's loop check) and adds the element, and `finish` ends it.
+ */
+interface Collect {
+  readonly init: string
+  readonly element: (fail: string, check: string) => string
+  readonly finish: string
 }
 
 class Emitter {
@@ -336,6 +399,14 @@ class Emitter {
       }
       case "Map": {
         if (!used) return this.gen(node.self, false, null, fail, fn, d)
+        if (node.f === toFloat && out !== null) {
+          const code = this.float(node, out, fail, fn, d)
+          if (code !== undefined) return code
+        }
+        // Streaming builds keep the array, which their checkpoints hold
+        if (node.f === fromEntries && out !== null && !this.resumable && entriesShape(node.self)) {
+          return this.entries(node.self, out, fail, fn, d)
+        }
         const t = this.v(fn)
         return this.gen(node.self, true, t, fail, fn, d) + set(`${this.const(node.f)}(${t})`)
       }
@@ -459,6 +530,30 @@ class Emitter {
     }
   }
 
+  /**
+   * `Ascii.float` and `Text.float` (`map(floatText, toFloat)`): numbers in
+   * decimal notation are matched and converted in one pass by
+   * `scanFloatString` or `scanFloatBytes`, without slicing the input; the
+   * rest (`nan`, `inf`, failures before a digit) runs the parser. Returns
+   * `undefined` when this does not apply.
+   */
+  private float(node: NodeOf<"Map">, out: string, fail: string, fn: Fn, d: number): string | undefined {
+    if (!floatTexts.has(node.self) || this.kind === 2) return undefined
+    let taken = nodeOf(node.self)
+    while (taken._tag === "Expected") taken = nodeOf(taken.self)
+    if (taken._tag !== "Taken") return undefined
+    const enc = taken.encoding
+    // Decimal notation is ASCII, which these encodings read unit by unit
+    if (enc !== undefined && !(this.native(enc) && enc.unit === 1 && enc.asciiCompatible)) return undefined
+    const t = this.v(fn)
+    const scan = this.const(floatScan)
+    // Near the end of a partial input, the parser may have to report `Incomplete`
+    const near = this.resumable ? `||$S.partial&&${scan}.read+${Margin}>E` : ""
+    return `${out}=${this.kind === 0 ? "R.scanFloatString" : "R.scanFloatBytes"}(I,p,E);` +
+      `if(${out}===void 0${near}){${this.gen(node.self, true, t, fail, fn, d)}${out}=${this.const(toFloat)}(${t})}` +
+      `else if(${out}===F){${BT}${fail}}else p=${scan}.end;`
+  }
+
   seq(node: NodeOf<"Seq">, used: boolean, out: string | null, fail: string, fn: Fn, d: number): string {
     const output = node.output
     if (out === null || !used) return node.parsers.map((q) => this.gen(q, false, null, fail, fn, d)).join("")
@@ -566,17 +661,25 @@ class Emitter {
     return code
   }
 
-  repeat(node: NodeOf<"Repeat"> | NodeOf<"Fold">, used: boolean, out: string | null, fail: string, fn: Fn, d: number): string {
+  repeat(
+    node: NodeOf<"Repeat"> | NodeOf<"Fold">,
+    used: boolean,
+    out: string | null,
+    fail: string,
+    fn: Fn,
+    d: number,
+    collect?: Collect
+  ): string {
     const { max, min } = node
     const loop = this.label()
     const bad = this.label()
     const n = this.v(fn)
     const st = this.v(fn)
     const isFold = node._tag === "Fold"
-    const keep = out !== null && used
+    const keep = out !== null && used && collect === undefined
     const x = keep ? this.v(fn) : null
     const acc = keep ? out! : this.v(fn)
-    let init = ""
+    let init = collect?.init ?? ""
     let add = ""
     if (keep) {
       if (isFold) {
@@ -593,10 +696,14 @@ class Emitter {
     const save = r === undefined
       ? ""
       : `if($S.mode==="Incomplete"&&$S.resume!==void 0)R.save($S,${r.key},${r.entry},{acc:${acc},count:${n},pos:${st}});`
+    // With `collect` (never in resumable builds), the element adds itself once the loop check passed
+    const element = collect === undefined
+      ? `${this.gen(node.self, keep, x, `break ${bad};`, fn, d)}${check}${add}`
+      : collect.element(`break ${bad};`, check)
     const body = `${loop}:for(;${bound};${n}++){${st}=p;` +
-      `${bad}:{${this.gen(node.self, keep, x, `break ${bad};`, fn, d)}${check}${add}continue ${loop};}` +
+      `${bad}:{${element}continue ${loop};}` +
       `${save}if($S.mode!=="Backtrack"${min > 0 ? `||${n}<${min}` : ""}){${fail}}p=${st};break ${loop};}`
-    if (r === undefined) return `${init}${n}=0;${body}`
+    if (r === undefined) return `${init}${n}=0;${body}${collect?.finish ?? ""}`
     return r.wrap(acc, `${acc}=cp.acc;${n}=cp.count;p=cp.pos;`, `${init}${n}=0;`, body)
   }
 
@@ -622,10 +729,18 @@ class Emitter {
     }
   }
 
-  separated(node: NodeOf<"Separated">, used: boolean, out: string | null, fail: string, fn: Fn, d: number): string {
+  separated(
+    node: NodeOf<"Separated">,
+    used: boolean,
+    out: string | null,
+    fail: string,
+    fn: Fn,
+    d: number,
+    collect?: Collect
+  ): string {
     const { max, min } = node
-    const keep = out !== null && used
-    if (max === 0) return keep ? `${out}=[];` : ""
+    const keep = out !== null && used && collect === undefined
+    if (max === 0) return collect !== undefined ? collect.init + collect.finish : keep ? `${out}=[];` : ""
     const x = keep ? this.v(fn) : null
     const acc = keep ? out! : this.v(fn)
     const n = this.v(fn)
@@ -644,33 +759,101 @@ class Emitter {
       return `${ok}:{${bad}:{${body(`break ${bad};`)}${success}break ${ok};}` +
         `${checkpoint}if($S.mode!=="Backtrack"${fatal}){${fail}}p=${st};break ${done};}`
     }
-    const self = (f: string) => this.gen(node.self, keep, x, f, fn, d)
+    const self = (f: string) => collect === undefined ? this.gen(node.self, keep, x, f, fn, d) : collect.element(f, "")
     const sep = (f: string) => this.gen(node.separator, false, null, f, fn, d)
     const check = max === Infinity ? `if(p===${st}){$S.mode="Cut";${fail}}` : ""
-    const first = `${keep ? `${acc}=[];` : ""}${n}=0;${st}=p;` + attempt(self, `${push}${n}++;`, min > 0 ? "||true" : "", "")
+    const first = `${collect?.init ?? (keep ? `${acc}=[];` : "")}${n}=0;${st}=p;` + attempt(self, `${push}${n}++;`, min > 0 ? "||true" : "", "")
     const rest = `${loop}:while(${max === Infinity ? "true" : `${n}<${max}`}){${st}=p;` +
       attempt(sep, "", `||${n}<${min}`, save) + check +
       attempt(self, `${push}${n}++;continue ${loop};`, `||${n}<${min}`, save) +
       `}`
-    if (r === undefined) return `${done}:{${first}${rest}}`
+    if (r === undefined) return `${done}:{${first}${rest}}${collect?.finish ?? ""}`
     // `done` ends the repetition; the checkpoint wrapper records the result after it
     return r.wrap(acc, `${acc}=cp.acc;${n}=cp.count;p=cp.pos;`, "", `${done}:{if(!${r.resumed}){${first}}${rest}}`)
+  }
+
+  /**
+   * `map(self, Object.fromEntries)`, where `entriesShape(self)`: builds the
+   * object directly, assigning each entry as it is parsed (see
+   * `internal/entries.ts`), without the pairs and their array. `cut`,
+   * `preceded`, `terminated` and diagnostics around the repetition are
+   * compiled as usual around it.
+   */
+  private entries(p: ParserLike, out: string, fail: string, fn: Fn, d: number): string {
+    const node = nodeOf(p)
+    switch (node._tag) {
+      case "Mode": {
+        const ok = this.label()
+        const bad = this.label()
+        return `${ok}:{${bad}:{${this.entries(node.self, out, `break ${bad};`, fn, d)}break ${ok};}` +
+          `if($S.mode===${JSON.stringify(node.from)})$S.mode=${JSON.stringify(node.to)};${fail}}`
+      }
+      case "Seq": {
+        const i = node.output as number
+        return node.parsers.map((q, j) =>
+          j === i ? this.entries(q, out, fail, fn, d) : this.gen(q, false, null, fail, fn, d)
+        ).join("")
+      }
+      case "Repeat":
+      case "Separated": {
+        const pair = pairOf(node.self)!
+        const deferred = this.v(fn)
+        const key = this.v(fn)
+        const value = this.v(fn)
+        const collect: Collect = {
+          init: `${out}={};${deferred}=void 0;`,
+          element: (f, check) =>
+            pair.parsers.map((q, j) =>
+              this.gen(q, j === pair.key || j === pair.value, j === pair.key ? key : j === pair.value ? value : null, f, fn, d)
+            ).join("") + check +
+            `if(${deferred}===void 0&&R.isPlainKey(${key}))${out}[${key}]=${value};` +
+            `else ${deferred}=R.addEntry(${out},${deferred},${key},${value});`,
+          finish: `if(${deferred}!==void 0)R.flushEntries(${out},${deferred});`
+        }
+        return node._tag === "Repeat"
+          ? this.repeat(node, true, out, fail, fn, d, collect)
+          : this.separated(node, true, out, fail, fn, d, collect)
+      }
+      default:
+        return this.entries((node as { readonly self: ParserLike }).self, out, fail, fn, d)
+    }
   }
 
   // ---------------------------------------------------------------------------
   // Tokens
   // ---------------------------------------------------------------------------
 
-  /** An expression: is the small unit `c` (below `TableSize`) accepted? */
-  private member(accept: Uint8Array, c: string): string {
-    const runs = runsOf(accept)
-    return rangeTest(runs, c) ?? `${this.const(accept)}[${c}]===1`
+  /** An expression: is the unit `c`, known to be below `size` (at most `TableSize`), accepted? */
+  private member(accept: Uint8Array, c: string, size: number = TableSize): string {
+    return tableTest(accept, c, size) ?? `${this.const(accept)}[${c}]===1`
   }
 
   /** An expression: is the code point `c` (at least `TableSize`) accepted? */
   private memberHigh(set: CharSet, negate: boolean, c: string): string {
     if (set.ranges !== undefined && !set.ranges.some(([, b]) => b >= TableSize)) return negate ? "true" : "false"
     return `${this.const(set.test)}(${c})!==${negate}`
+  }
+
+  /**
+   * An expression: does a `Text` set accept the unit `c`, known to be below
+   * `r.fast`? Code points from `TableSize` up are tested by the set's
+   * function, unless its ranges show they are all rejected.
+   */
+  private textAccepts(r: Reader, cs: CharSet, accept: Uint8Array, negate: boolean, c: string): string {
+    if (r.fast <= TableSize) return `(${this.member(accept, c, r.fast)})`
+    const member = this.member(accept, c)
+    if (reachesAbove(cs, TableSize)) return `(${c}<${TableSize}?${member}:${this.const(cs.test)}(${c})!==${negate})`
+    return negate ? `(${c}>=${TableSize}||${member})` : `(${c}<${TableSize}&&${member})`
+  }
+
+  /**
+   * An expression: does a `Text` set reject `c`, a code point that `decode`
+   * returned? The built-in encodings only decode code points from `r.fast`
+   * up there.
+   */
+  private textRejectsDecoded(enc: Encoding<any>, r: Reader, cs: CharSet, negate: boolean, c: string): string {
+    if (r.fast > 0 && builtinEncodings.has(enc) && !reachesAbove(cs, r.fast)) return String(!negate)
+    return `${this.const(cs.test)}(${c})===${negate}`
   }
 
   token(
@@ -744,15 +927,11 @@ class Emitter {
             `if(${cp}>65535){${set(value("2"))}p+=2}else{${set("I[p]")}p++}}`
         }
         const r = this.reader(enc)
-        const test = this.const(cs.test)
-        const accepts = r.fast > TableSize
-          ? `(${c}<${TableSize}?${this.member(accept, c)}:${test}(${c})!==${negate})`
-          : `(${this.member(accept, c)})`
         return `if(p>=E)${failBT}` +
           (r.fast > 0
-            ? `if(${r.guard("p")}&&(${c}=${r.unit("p")})<${r.fast}){if(!${accepts})${failBT}${set(`R.charOf(${c})`)}p+=${r.width}}else`
+            ? `if(${r.guard("p")}&&(${c}=${r.unit("p")})<${r.fast}){if(!${this.textAccepts(r, cs, accept, negate, c)})${failBT}${set(`R.charOf(${c})`)}p+=${r.width}}else`
             : "") +
-          `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${test}(${c})===${negate})${failBT}` +
+          `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${this.textRejectsDecoded(enc, r, cs, negate, c)})${failBT}` +
           `${set(`R.charOf(${c})`)}p+=${this.const(enc.width)}(${c})}`
       }
       case "TakeWhile":
@@ -811,13 +990,13 @@ class Emitter {
     if (enc !== undefined) {
       // Text: inline the encoding's single-unit code points, decode the rest
       const r = this.reader(enc)
-      const test = this.const(cs.test)
-      const accepts = r.fast > TableSize
-        ? `(${c}<${TableSize}?${member}:${test}(${c})!==${negate})`
-        : `(${member})`
+      // The loop condition already checks a unit of width 1
+      const guard = r.width === 1 ? "" : `${r.guard("p")}&&`
       return `${st}=p;${counted ? `${n}=0;` : ""}${loop}:while(p<E${bound}){` +
-        (r.fast > 0 ? `if(${r.guard("p")}&&(${c}=${r.unit("p")})<${r.fast}){if(!${accepts})break ${loop};p+=${r.width}}else` : "") +
-        `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${test}(${c})===${negate})break ${loop};` +
+        (r.fast > 0
+          ? `if(${guard}(${c}=${r.unit("p")})<${r.fast}){if(!${this.textAccepts(r, cs, accept, negate, c)})break ${loop};p+=${r.width}}else`
+          : "") +
+        `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${this.textRejectsDecoded(enc, r, cs, negate, c)})break ${loop};` +
         `p+=${this.const(enc.width)}(${c})}${count}}${finish}`
     }
     const fast = 0xd800
@@ -826,8 +1005,13 @@ class Emitter {
     // Token on strings: code points, with lenient surrogates
     const cp = this.v(fn)
     const never = highTest(c) === "false"
+    // Every code point from `TableSize` up is accepted: without a count,
+    // surrogate pairs can be skipped a unit at a time
+    const always = highTest(c) === "true"
     const rest = never && !negate
       ? `break;`
+      : always && !counted
+      ? `p++;`
       : `if(${c}<${fast}||${c}>56319){if(!(${highTest(c)}))break ${loop};p++}` +
         `else{${cp}=${c};if(p+1<I.length){const d=I.charCodeAt(p+1);if((d&64512)===56320)${cp}=((${c}-55296)<<10)+(d-56320)+65536}` +
         `if(!(${highTest(cp)}))break ${loop};p+=${cp}>65535?2:1}`

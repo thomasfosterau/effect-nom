@@ -43,6 +43,7 @@ import { Fail, Failure, mergeExpected, mergeFailures, State } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
 import * as ParseError from "./ParseError.js"
 import * as Compiler from "./internal/compiler/registry.js"
+import * as Entries from "./internal/entries.js"
 import * as Resume from "./internal/resume.js"
 import type { Node } from "./internal/node.js"
 import { bounds, NodeId } from "./internal/node.js"
@@ -480,6 +481,32 @@ export const map: {
     return a === Fail ? Fail : f(a)
   }, self.name, { _tag: "Map", self, f })
 })
+
+/**
+ * Builds an object from the `[key, value]` entries a parser returns, as
+ * `Object.fromEntries` does: `fromEntries(self)` is
+ * `map(self, Object.fromEntries)`.
+ *
+ * Compiled parsers build the object directly when `self` repeats a pair
+ * (`separated` or `repeat` of `separatedPair` or a two-element `seq`,
+ * possibly inside `preceded`, `terminated`, `delimited` or `cut`), without
+ * the pairs and the array. They do the same for `map(Object.fromEntries)`.
+ *
+ * @example
+ * ```ts
+ * import { Ascii, Parser, Token } from "effect-nom"
+ *
+ * const entry = Parser.separatedPair(Ascii.alpha1, Token.literal("="), Ascii.decUint)
+ * const record = Parser.fromEntries(Parser.separated(entry, Token.literal(",")))
+ * Parser.parse(record, "a=1,b=2") // Result.succeed({ a: 1, b: 2 })
+ * ```
+ *
+ * @since 0.2.0
+ * @category mapping
+ */
+export const fromEntries = <K extends PropertyKey, V, E, R, I extends Input>(
+  self: Parser<Iterable<readonly [K, V]>, E, R, I>
+): Parser<{ [P in K]: V }, E, R, I> => map(self, Entries.fromEntries)
 
 /**
  * Replaces the output of a parser with a constant (winnow's `value`, nom's

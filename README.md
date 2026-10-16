@@ -157,7 +157,7 @@ const upper = Parser.make<string>((state) => {
 | Category | Combinators |
 |---|---|
 | Constructors | `succeed`, `sync`, `empty`, `fail`, `failMessage`, `reject`, `todo`, `suspend`, `make`, `location`, `eof` |
-| Mapping | `map`, `as`, `asVoid`, `asSome`, `tap`, `tryMap`, `tryMapUnknown`, `filterMap`, `filter`, `filterOrFail`, `mapParser` |
+| Mapping | `map`, `as`, `asVoid`, `asSome`, `tap`, `tryMap`, `tryMapUnknown`, `filterMap`, `filter`, `filterOrFail`, `mapParser`, `fromEntries` |
 | Sequencing | `seq`, `struct`, `zip`, `zipWith`, `zipLeft`, `zipRight`, `preceded`, `terminated`, `delimited`, `separatedPair`, `flatMap`, `gen`, `Do`/`bind`/`bindTo`/`let` |
 | Choice | `alt`, `orElse`, `orElseSucceed`, `dispatch`, `permutation` |
 | Repetition | `repeat`, `repeatTill`, `separated`, `separatedFoldl1`, `separatedFoldr1`, `fold` |
@@ -215,8 +215,9 @@ export const json = Parser.compile(Parser.preceded(ws, value))
 Parser.parse(json, text) // same Result as before, about 5 times faster
 ```
 
-On the JSON example, compiled parsing runs at 4.6–5.3 times the speed of
-the interpreter, for strings, UTF-8 and UTF-16 alike (see
+On the JSON example, compiled parsing runs at 5–6 times the speed of the
+interpreter, for strings, UTF-8 and UTF-16 alike, and at 1–4 times the
+time of `JSON.parse` depending on the document (see
 [the design notes](docs/DESIGN.md#results)).
 
 `compile` returns the same parser. The code is built on the first run, for
@@ -232,6 +233,21 @@ therefore be pure: on failing input they may run twice, and those whose
 results are unused may be skipped. Parsers built with `Parser.make` or
 `Parser.gen` run interpreted inside compiled code. See the
 [design notes](docs/DESIGN.md#6-compiled-parsers) for details.
+
+Some ways of writing a grammar compile to faster code than others:
+
+- Build objects with `Parser.fromEntries` (or `Parser.map(Object.fromEntries)`)
+  directly on a `separated` or `repeat` of pairs: compiled code assigns the
+  properties as it parses, without the pairs and their array. A lambda that
+  calls `Object.fromEntries` can't be recognized.
+- Prefer token sets (`"abc"`, `Token.range`, the `Ascii` predicates) to
+  arbitrary predicates: they compile to comparisons.
+- Avoid `flatMap` on hot paths: the parser it returns runs interpreted.
+- `Ascii.float` and `Text.float` convert numbers as they match them.
+
+[`json-fast.ts`](examples/json-fast.ts) is the JSON example written this
+way; it runs records-heavy documents about 1.5 times as fast as
+[`json-text.ts`](examples/json-text.ts).
 
 ## Errors
 
@@ -493,6 +509,8 @@ in [`test/examples.test.ts`](test/examples.test.ts):
 - [`json.ts`](examples/json.ts): JSON with `dispatch`, `cut` and escapes
 - [`json-text.ts`](examples/json-text.ts): the same grammar written once
   against `Text.TextParsers`, for strings, UTF-8 and UTF-16
+- [`json-fast.ts`](examples/json-fast.ts): the same grammar written for
+  compiled parsers, with `Parser.fromEntries`
 - [`arithmetic.ts`](examples/arithmetic.ts): direct evaluation, an AST via
   the Pratt parser, and a lexer plus a parser over the token array
 - [`ini.ts`](examples/ini.ts): INI files with a generator-style parser

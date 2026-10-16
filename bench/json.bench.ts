@@ -5,6 +5,7 @@
  * `json.ts` uses the `Token` and `Ascii` parsers on a string. `json-text.ts`
  * is the same grammar written once against `Text.TextParsers`, run on a
  * string and on UTF-8 and UTF-16 encodings of the same document.
+ * `json-fast.ts` is that grammar written for compiled parsers.
  *
  * Each case runs many times, interleaved with the others, and the best
  * time is reported: it is the least noisy estimate on a busy machine.
@@ -13,6 +14,7 @@
  */
 import { Encoding, Parser, Text } from "effect-nom"
 import { json } from "../examples/json.ts"
+import { makeJson as makeFastJson } from "../examples/json-fast.ts"
 import { makeJson } from "../examples/json-text.ts"
 import { parseFused } from "./json-fused.ts"
 
@@ -53,7 +55,9 @@ const grammars = [
   ["Token/Ascii, string", json, doc],
   ["Text.string", makeJson(Text.string), doc],
   ["Text.utf8", makeJson(Text.utf8), utf8],
-  ["Text.utf16le", makeJson(Text.utf16le), utf16]
+  ["Text.utf16le", makeJson(Text.utf16le), utf16],
+  ["json-fast.ts, Text.string", makeFastJson(Text.string), doc],
+  ["json-fast.ts, Text.utf8", makeFastJson(Text.utf8), utf8]
 ] as const
 for (const [group, grammar, input] of grammars) {
   for (const backend of backends) {

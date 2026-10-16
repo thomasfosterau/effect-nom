@@ -8,6 +8,7 @@ import * as Arithmetic from "../examples/arithmetic.js"
 import * as Http from "../examples/http.js"
 import * as Ini from "../examples/ini.js"
 import * as Json from "../examples/json.js"
+import * as JsonFast from "../examples/json-fast.js"
 import { makeJson } from "../examples/json-text.js"
 import * as Sexpr from "../examples/sexpr.js"
 import type { Input } from "../src/index.js"
@@ -161,6 +162,29 @@ describe("compiled examples", () => {
     for (const input of jsonInputs) same(p, (encode as (s: string) => Input.Input)(input))
   })
 
+  it.each([
+    ["Text.string", Text.string, (s: string) => s],
+    ["Text.utf8", Text.utf8, (s: string) => Encoding.utf8.encode(s)],
+    ["Text.utf16le", Text.utf16le, (s: string) => Encoding.utf16le.encode(s)]
+  ] as const)("json-fast with %s, accepting what json-text accepts", (_, T, encode) => {
+    const fast = JsonFast.makeJson(T as Text.TextParsers<any>)
+    const text = makeJson(T as Text.TextParsers<any>)
+    const inputs = [
+      ...jsonInputs,
+      "{\"__proto__\": 1, \"toString\": [2], \"constructor\": {\"__proto__\": null}}",
+      "{\"a\": 1, \"a\": 2, \"b\": {\"a\": 3, \"a\": 4}}",
+      "\"\\ud83d\\ude00\\udc00\\u0041\"", "\"\\ud83d\\u0041\"", "\"\\ud83d\"", "\"\\ud83d\\x\""
+    ]
+    for (const input of inputs) {
+      const bytes = (encode as (s: string) => Input.Input)(input)
+      same(fast, bytes)
+      const a = Parser.parse(fast, bytes as never)
+      const b = Parser.parse(text, bytes as never)
+      expect(Result.isSuccess(a), input).toBe(Result.isSuccess(b))
+      if (Result.isSuccess(a) && Result.isSuccess(b)) expect(a.success, input).toEqual(b.success)
+    }
+  })
+
   it("json-text on malformed bytes", () => {
     const p = makeJson(Text.utf8)
     const random = rng(7)
@@ -276,6 +300,13 @@ const grammars: ReadonlyArray<readonly [string, Parser.Parser<any, any, never, s
   ["takeWhile with a string predicate", Token.takeWhile((c: string) => c !== "b" && c < "😀")],
   ["takeUntil", Parser.seq(Token.takeUntil("ab"), Token.rest)],
   ["literal edge cases", Parser.seq(Token.literal(""), Parser.opt(Token.literal("a😀")), Parser.opt(Ascii.caseless("Ab")))],
+  ["fromEntries of separated pairs", Parser.fromEntries(Parser.separated(Parser.separatedPair(Token.oneOf("ab"), Token.literal("+"), Parser.opt(digit)), Token.literal("\\")))],
+  ["fromEntries of a ranged repeat", Parser.fromEntries(Parser.repeat(Parser.seq(Token.oneOf("ab01"), Parser.opt(Token.literal("e"))), { min: 1, max: 3 }))],
+  ["fromEntries through preceded and cut", Parser.preceded(a, Parser.cut(Parser.terminated(Parser.separated(Parser.seq(digit, Token.oneOf("ab")), Token.literal("+"), { max: 2 }), b))).pipe(Parser.fromEntries, Parser.context("entries"))],
+  // Keys need not be property keys: they are converted, as Object.fromEntries does
+  ["fromEntries of nothing", Parser.fromEntries(Parser.repeat(Parser.seq(Parser.opt(a), Parser.opt(b))) as unknown as Parser.Parser<Array<[string, unknown]>>)],
+  ["fromEntries of separated nothing", Parser.fromEntries(Parser.separated(Parser.seq(Parser.opt(a), Parser.opt(digit)), Parser.opt(b)) as unknown as Parser.Parser<Array<[string, unknown]>>)],
+  ["map(Object.fromEntries)", Parser.map(Parser.separated(Parser.separatedPair(digit, Parser.opt(Token.literal(".")), Token.oneOf("ab")), Token.literal("+")), Object.fromEntries)],
   ["Ascii numbers", Parser.separated(Parser.alt(Ascii.float, Ascii.hexUint), Token.literal(","))],
   ["Ascii integers", Parser.seq(Ascii.decInt, Parser.opt(Parser.preceded(Token.literal(":"), Ascii.decUint)))],
   ["Ascii classes", Parser.seq(Ascii.alpha0, Ascii.digit0, Ascii.space0, Parser.opt(Ascii.alphanumeric1), Parser.opt(Ascii.lineEnding))],
@@ -375,6 +406,133 @@ describe("compiled combinators", () => {
   it("caseless literals with other characters", () => {
     const p = Parser.seq(Parser.opt(Ascii.caseless("+0a")), Parser.opt(Ascii.caseless("@")), Token.rest)
     for (const input of allStrings(["+", "\u000b", "0", "\u0010", "a", "A", "@", "`"], 3)) same(p, input)
+  })
+
+  // Sets compile to comparisons on their accepted or rejected ranges, or to a
+  // table: every code unit up to 0x103 crosses each boundary
+  it("token sets at their boundaries", () => {
+    const sets: ReadonlyArray<unknown> = [
+      ["\"\\", Token.range("\u0000", "\u001f")],
+      Token.range("a", "z"),
+      Token.range(" ", "~"),
+      [Token.range("0", "9"), Token.range("A", "F"), Token.range("a", "f")],
+      Token.range("\u0080", "ÿ"),
+      Token.range("\u0000", "\u007f"),
+      [Token.range("a", "ÿ"), "_"],
+      [Token.range("\u0001", "~"), "ÿ"],
+      "acegikmoq",
+      // Cheaper to test by the rejected units, up to the end of the table
+      [Token.range("\u0000", "\t"), Token.range("\u000b", "\u00c7")],
+      [Token.range("\u0000", "\t"), Token.range("\u000b", "c")],
+      [Token.range("\u0000", "\t"), Token.range("\u000b", "\u0013"), Token.range("\u001e", "'"), Token.range(")", "\u00ff")],
+      (c: string) => c > "m" && c !== "x"
+    ]
+    const units = Array.from({ length: 0x104 }, (_, i) => String.fromCharCode(i))
+    const inputs = [...units.map((c) => `${c}${c}a`), "é😀", "😀\u0000", "\ud800a", "Āÿ"]
+    for (const set of sets) {
+      const token = Parser.seq(
+        Parser.opt(Token.oneOf(set as never)),
+        Parser.opt(Token.noneOf(set as never)),
+        Token.takeWhile(set as never),
+        Token.takeTill(set as never, { max: 2 })
+      )
+      for (const input of inputs) same(token, input)
+      const bytes = Parser.seq(Token.takeWhile<Uint8Array>(set as never), Token.takeTill<Uint8Array>(set as never))
+      for (let b = 0; b < 256; b++) same(bytes as any, new Uint8Array([b, b, 0x61]))
+      for (const T of [Text.string, Text.utf8, Text.latin1] as ReadonlyArray<Text.TextParsers<any>>) {
+        const text = Parser.seq(
+          Parser.opt(T.oneOf(set as never)),
+          Parser.opt(T.noneOf(set as never)),
+          T.takeWhile(set as never),
+          T.takeTill(set as never, { max: 2 })
+        )
+        for (const input of inputs) {
+          if (T === Text.latin1 && /[^\u0000-ÿ]/.test(input)) continue
+          if (T === Text.utf8 && /[\ud800-\udfff]/.test(input.replace("😀", ""))) continue
+          same(text, (T.encoding as Encoding.Encoding<any>).encode(input))
+        }
+      }
+    }
+  })
+
+  // Compiled floats are read from the input without slicing it, when they
+  // are in decimal notation
+  it("float conversions", () => {
+    const random = rng(5)
+    const digits = (n: number) => Array.from({ length: n }, () => Math.floor(random() * 10)).join("")
+    const generated = Array.from({ length: 3000 }, (_, i) => {
+      const sign = ["", "-", "+"][i % 3]!
+      const int = digits(Math.floor(random() * 12))
+      const frac = random() < 0.6 ? `.${digits(Math.floor(random() * 12))}` : ""
+      const exp = random() < 0.4 ? `${random() < 0.5 ? "e" : "E"}${["", "-", "+"][i % 3]}${Math.floor(random() * 30)}` : ""
+      return `${sign}${int}${frac}${exp}`
+    })
+    const inputs = [
+      "0", "-0", "+0", "0.0", "-0.0e5", "-0e-999", "1", "123456789012345", "1234567890123456", "999999999999999",
+      "9999999999999999", "12345678901234567890", "0.1", "0.30000000000000004", "1e22", "1e23", "-1e-22", "1e-23",
+      "9007199254740993", "1.7976931348623157e308", "1e309", "-1e309", "5e-324", "4.9e-324", "1e-400", ".5", "5.",
+      "+.5e-3", "1e", "1e+", "1.e5", "0000.0001", "00012", "1E5", "1.5e-22", "123.456e-20", "123.456e+20",
+      "0.000000000000000000000000000001", "100000000000000000000000", "1e0000000000000000000001", "nan", "-inf",
+      "infinity", "INF", "+Infinity", "1_0", "1.2.3", "-", "+", ".", "e5", "1e5x", "12,5",
+      // 16 to 19 significant digits, including ties between doubles
+      "18014398509481985", "18014398509481987", "1.000000000000000111", "0.1000000000000000055511151231257827",
+      "123456789012345678e-22", "9999999999999999999e22", "-0.0000000000000000001234567890123456789",
+      "4.35679845407817e15", "3.0517578125000000001e-5", "2.2250738585072011e-308",
+      ...Array.from({ length: 300 }, () => ((random() - 0.5) * 10 ** Math.floor(random() * 30 - 12)).toPrecision(16 + Math.floor(random() * 4))),
+      ...generated
+    ]
+    const encodings = [
+      ["string", Ascii.float, (s: string) => s],
+      ["bytes", Ascii.bytes.float, (s: string) => Encoding.utf8.encode(s)],
+      ["Text.string", Text.string.float, (s: string) => s],
+      ["Text.utf8", Text.utf8.float, (s: string) => Encoding.utf8.encode(s)],
+      ["Text.latin1", Text.latin1.float, (s: string) => Encoding.latin1.encode(s)],
+      ["Text.utf16le", Text.utf16le.float, (s: string) => Encoding.utf16le.encode(s)]
+    ] as const
+    for (const [, float, encode] of encodings) {
+      const p = Parser.seq(float as Parser.Parser<number, never, never, any>, Token.restLen)
+      for (const input of inputs) {
+        const bytes = (encode as (s: string) => Input.Input)(input)
+        same(p, bytes)
+        const expected = Parser.parse(p, bytes as never)
+        for (const backend of backends) {
+          const actual = Parser.parse(twin(p, backend), bytes as never)
+          if (Result.isSuccess(expected) && Result.isSuccess(actual)) {
+            // `toEqual` does not tell 0 from -0
+            expect(Object.is(actual.success[0], expected.success[0]), `${backend} on ${input}`).toBe(true)
+          }
+        }
+      }
+    }
+  })
+
+  // Compiled parsers assign plain keys and define the others, as
+  // Object.fromEntries does
+  it("fromEntries keys", () => {
+    const sym = Symbol("s")
+    const key = Parser.alt(
+      Token.literal("p").pipe(Parser.as("__proto__")),
+      Token.literal("t").pipe(Parser.as("toString")),
+      Token.literal("x").pipe(Parser.as("x")),
+      // An object key that converts to "x", and one whose conversion counts
+      Token.literal("o").pipe(Parser.map(() => ({ toString: () => "x" }))),
+      Token.literal("s").pipe(Parser.as(sym)),
+      Token.literal("1").pipe(Parser.as(1)),
+      Token.literal("n").pipe(Parser.as(null))
+    )
+    const entries = Parser.fromEntries(Parser.repeat(Parser.seq(key, Token.oneOf("abc"))) as unknown as Parser.Parser<Array<[string, string]>>)
+    const describe = (o: any) => ({
+      proto: Object.getPrototypeOf(o) === Object.prototype,
+      keys: Reflect.ownKeys(o).map(String),
+      values: Reflect.ownKeys(o).map((k) => o[k]),
+      descriptors: Reflect.ownKeys(o).map((k) => Object.getOwnPropertyDescriptor(o, k))
+    })
+    for (const input of allStrings(["pa", "tb", "xa", "oc", "sb", "1a", "nb"], 3).map((s) => s)) {
+      const expected = describe(Parser.parseSync(entries, input))
+      for (const backend of backends) {
+        expect(describe(Parser.parseSync(twin(entries, backend), input)), `${backend} on ${input}`).toEqual(expected)
+      }
+    }
   })
 
   it("array inputs", () => {
