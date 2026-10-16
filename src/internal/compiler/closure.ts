@@ -13,6 +13,7 @@ import { Fail } from "../../Input.js"
 import * as Option from "effect/Option"
 import type { Node, NodeOf, ParserLike } from "../node.js"
 import { nodeOf } from "../node.js"
+import { floatScan, floatTexts, scanFloatBytes, scanFloatString, toFloat } from "../numbers.js"
 import { charOf, fastLimit, fold, validate } from "../text.js"
 import { countTokens, indexOf } from "../tokens.js"
 import type { AltPlan } from "./first.js"
@@ -141,6 +142,10 @@ class Compiler {
         return this.escaped(node)
       case "Map": {
         if (!used) return this.compile(node.self, false)
+        if (node.f === toFloat) {
+          const step = this.float(node)
+          if (step !== undefined) return step
+        }
         const c = this.compile(node.self, true)
         const f = node.f
         return (s) => {
@@ -1124,6 +1129,32 @@ class Compiler {
       while (i < end && unitAt(input, i) < fast) i++
       if (i < end && validate(enc, s, i, end) < 0) return fail(s)
       return used ? toText(input, start, end) : undefined
+    }
+  }
+
+  /**
+   * `Ascii.float` and `Text.float` (`map(floatText, toFloat)`): numbers in
+   * decimal notation are matched and converted in one pass, without
+   * slicing the input; the rest runs the compiled parser (see the JIT).
+   */
+  private float(node: NodeOf<"Map">): Step | undefined {
+    if (!floatTexts.has(node.self) || this.kind === 2) return undefined
+    let taken = nodeOf(node.self)
+    while (taken._tag === "Expected") taken = nodeOf(taken.self)
+    if (taken._tag !== "Taken") return undefined
+    const enc = taken.encoding
+    if (enc !== undefined && !(this.native(enc) && enc.unit === 1 && enc.asciiCompatible)) return undefined
+    const c = this.compile(node.self, true)
+    const scan = (this.kind === 0 ? scanFloatString : scanFloatBytes) as (input: unknown, i: number, end: number) => unknown
+    return (s) => {
+      const v = scan(s.input, s.pos, s.end)
+      if (v === undefined) {
+        const t = c(s)
+        return t === Fail ? Fail : toFloat(t)
+      }
+      if (v === Fail) return fail(s)
+      s.pos = floatScan.end
+      return v
     }
   }
 

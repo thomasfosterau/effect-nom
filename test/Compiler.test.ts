@@ -461,6 +461,57 @@ describe("compiled combinators", () => {
     }
   })
 
+  // Compiled floats are read from the input without slicing it, when they
+  // are in decimal notation
+  it("float conversions", () => {
+    const random = rng(5)
+    const digits = (n: number) => Array.from({ length: n }, () => Math.floor(random() * 10)).join("")
+    const generated = Array.from({ length: 3000 }, (_, i) => {
+      const sign = ["", "-", "+"][i % 3]!
+      const int = digits(Math.floor(random() * 12))
+      const frac = random() < 0.6 ? `.${digits(Math.floor(random() * 12))}` : ""
+      const exp = random() < 0.4 ? `${random() < 0.5 ? "e" : "E"}${["", "-", "+"][i % 3]}${Math.floor(random() * 30)}` : ""
+      return `${sign}${int}${frac}${exp}`
+    })
+    const inputs = [
+      "0", "-0", "+0", "0.0", "-0.0e5", "-0e-999", "1", "123456789012345", "1234567890123456", "999999999999999",
+      "9999999999999999", "12345678901234567890", "0.1", "0.30000000000000004", "1e22", "1e23", "-1e-22", "1e-23",
+      "9007199254740993", "1.7976931348623157e308", "1e309", "-1e309", "5e-324", "4.9e-324", "1e-400", ".5", "5.",
+      "+.5e-3", "1e", "1e+", "1.e5", "0000.0001", "00012", "1E5", "1.5e-22", "123.456e-20", "123.456e+20",
+      "0.000000000000000000000000000001", "100000000000000000000000", "1e0000000000000000000001", "nan", "-inf",
+      "infinity", "INF", "+Infinity", "1_0", "1.2.3", "-", "+", ".", "e5", "1e5x", "12,5",
+      // 16 to 19 significant digits, including ties between doubles
+      "18014398509481985", "18014398509481987", "1.000000000000000111", "0.1000000000000000055511151231257827",
+      "123456789012345678e-22", "9999999999999999999e22", "-0.0000000000000000001234567890123456789",
+      "4.35679845407817e15", "3.0517578125000000001e-5", "2.2250738585072011e-308",
+      ...Array.from({ length: 300 }, () => ((random() - 0.5) * 10 ** Math.floor(random() * 30 - 12)).toPrecision(16 + Math.floor(random() * 4))),
+      ...generated
+    ]
+    const encodings = [
+      ["string", Ascii.float, (s: string) => s],
+      ["bytes", Ascii.bytes.float, (s: string) => Encoding.utf8.encode(s)],
+      ["Text.string", Text.string.float, (s: string) => s],
+      ["Text.utf8", Text.utf8.float, (s: string) => Encoding.utf8.encode(s)],
+      ["Text.latin1", Text.latin1.float, (s: string) => Encoding.latin1.encode(s)],
+      ["Text.utf16le", Text.utf16le.float, (s: string) => Encoding.utf16le.encode(s)]
+    ] as const
+    for (const [, float, encode] of encodings) {
+      const p = Parser.seq(float as Parser.Parser<number, never, never, any>, Token.restLen)
+      for (const input of inputs) {
+        const bytes = (encode as (s: string) => Input.Input)(input)
+        same(p, bytes)
+        const expected = Parser.parse(p, bytes as never)
+        for (const backend of backends) {
+          const actual = Parser.parse(twin(p, backend), bytes as never)
+          if (Result.isSuccess(expected) && Result.isSuccess(actual)) {
+            // `toEqual` does not tell 0 from -0
+            expect(Object.is(actual.success[0], expected.success[0]), `${backend} on ${input}`).toBe(true)
+          }
+        }
+      }
+    }
+  })
+
   it("array inputs", () => {
     const p = Parser.separated(Token.oneOf<ReadonlyArray<string>>(["x", "y"]), Token.literal(["+"]))
     for (const input of allStrings(["x", "y", "+", "z"], 5)) same(p as any, Array.from(input))

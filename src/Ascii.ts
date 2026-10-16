@@ -28,6 +28,7 @@ import { Fail } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
 import type { Parser } from "./Parser.js"
 import * as P from "./Parser.js"
+import * as numbers from "./internal/numbers.js"
 import { latin1 } from "./internal/text.js"
 import { codePointPredicate } from "./internal/tokens.js"
 import { literalImpl, range, takeWhileImpl } from "./Token.js"
@@ -402,25 +403,13 @@ const unsignedFloat = P.alt(
   P.seq(Token.literal("."), digit1, exponent),
   P.seq(digit1, P.opt(P.seq(Token.literal("."), P.opt(digit1))), exponent)
 )
-const floatText = P.taken(P.alt(
+const floatText = numbers.floatText(P.taken(P.alt(
   literalImpl("nan", true),
   P.seq(sign, unsignedFloat)
-)).pipe(P.expected("number")) as Parser<string>
+)).pipe(P.expected("number")) as Parser<string>)
 
 /** @internal */
-export const toFloat = (s: Input): number => {
-  if (typeof s === "string") {
-    // Plain decimal notation (as opposed to `inf` or `nan`) ends in a digit or "."
-    const last = s.charCodeAt(s.length - 1)
-    if ((last >= 48 && last <= 57) || last === 46) return Number(s)
-  }
-  const t = toText(s).toLowerCase()
-  const negative = t.startsWith("-")
-  const body = t.startsWith("-") || t.startsWith("+") ? t.slice(1) : t
-  if (body === "nan") return NaN
-  if (body.startsWith("inf")) return negative ? -Infinity : Infinity
-  return Number(t)
-}
+export const toFloat: (s: Input) => number = numbers.toFloat
 
 /**
  * A floating point number in decimal or scientific notation, including

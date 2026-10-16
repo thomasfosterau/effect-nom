@@ -42,6 +42,7 @@ import type { Input, State } from "./Input.js"
 import { Fail } from "./Input.js"
 import { escapedImpl, overflow, takeEscapedImpl, toFloat } from "./Ascii.js"
 import { codePointPredicate, compile, indexOf, matchLiteral } from "./internal/tokens.js"
+import { floatText as markFloatText } from "./internal/numbers.js"
 import * as internal from "./internal/text.js"
 import type { Node } from "./internal/node.js"
 import type { ErrorKind } from "./ParseError.js"
@@ -639,7 +640,7 @@ export const make = <I extends string | Uint8Array>(encoding: Encoding<I>): Text
     P.seq(literal("."), asciiDigits, exponent),
     P.seq(asciiDigits, P.opt(P.seq(literal("."), P.opt(asciiDigits))), exponent)
   )
-  const floatText = taken(P.alt(caseless("nan"), P.seq(sign, unsignedFloat))).pipe(P.expected("number"))
+  const floatText = markFloatText(taken(P.alt(caseless("nan"), P.seq(sign, unsignedFloat))).pipe(P.expected("number")))
 
   const matchControl = (control: string) => {
     const ctrl = control.codePointAt(0)!

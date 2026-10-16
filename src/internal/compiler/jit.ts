@@ -20,6 +20,7 @@ import type { State } from "../../Input.js"
 import { Fail } from "../../Input.js"
 import type { Node, NodeOf, ParserLike } from "../node.js"
 import { children, nodeOf } from "../node.js"
+import { floatScan, floatTexts, scanFloatBytes, scanFloatString, toFloat } from "../numbers.js"
 import { charOf, fastLimit, latin1, string, utf16be, utf16le, utf8, validate } from "../text.js"
 import type { ClosureCompiler, Fallback, Step } from "./closure.js"
 import { createClosureCompiler } from "./closure.js"
@@ -33,6 +34,8 @@ const runtime = {
   some: Option.some,
   none: Option.none,
   charOf,
+  scanFloatString,
+  scanFloatBytes,
   /** `Text.taken`: the text of `[start, end)`, or `Fail` if it is malformed. */
   textOf: (enc: Encoding<any>, fast: number, s: State<any>, start: number, end: number): unknown => {
     const input = s.input
@@ -340,6 +343,10 @@ class Emitter {
       }
       case "Map": {
         if (!used) return this.gen(node.self, false, null, fail, fn, d)
+        if (node.f === toFloat && out !== null) {
+          const code = this.float(node, out, fail, fn, d)
+          if (code !== undefined) return code
+        }
         const t = this.v(fn)
         return this.gen(node.self, true, t, fail, fn, d) + set(`${this.const(node.f)}(${t})`)
       }
@@ -461,6 +468,27 @@ class Emitter {
       default:
         return this.delegate(p, used, out, fail, fn)
     }
+  }
+
+  /**
+   * `Ascii.float` and `Text.float` (`map(floatText, toFloat)`): numbers in
+   * decimal notation are matched and converted in one pass by
+   * `scanFloatString` or `scanFloatBytes`, without slicing the input; the
+   * rest (`nan`, `inf`, failures before a digit) runs the parser. Returns
+   * `undefined` when this does not apply.
+   */
+  private float(node: NodeOf<"Map">, out: string, fail: string, fn: Fn, d: number): string | undefined {
+    if (!floatTexts.has(node.self) || this.kind === 2) return undefined
+    let taken = nodeOf(node.self)
+    while (taken._tag === "Expected") taken = nodeOf(taken.self)
+    if (taken._tag !== "Taken") return undefined
+    const enc = taken.encoding
+    // Decimal notation is ASCII, which these encodings read unit by unit
+    if (enc !== undefined && !(this.native(enc) && enc.unit === 1 && enc.asciiCompatible)) return undefined
+    const t = this.v(fn)
+    return `${out}=${this.kind === 0 ? "R.scanFloatString" : "R.scanFloatBytes"}(I,p,E);` +
+      `if(${out}===void 0){${this.gen(node.self, true, t, fail, fn, d)}${out}=${this.const(toFloat)}(${t})}` +
+      `else if(${out}===F){${BT}${fail}}else p=${this.const(floatScan)}.end;`
   }
 
   seq(node: NodeOf<"Seq">, used: boolean, out: string | null, fail: string, fn: Fn, d: number): string {
