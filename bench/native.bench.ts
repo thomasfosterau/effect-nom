@@ -5,13 +5,15 @@
  * Each document is parsed from a string, and from its UTF-8 bytes: natively
  * with `TextDecoder` then `JSON.parse` (what `Response.json()` does), and
  * with `Text.utf8`, which parses the bytes without decoding them first.
- * Every case runs many times, interleaved with the others, and the best time
- * is reported.
+ * `json-fast.ts` is the same grammar written for compiled parsers (objects
+ * built with `Parser.fromEntries`). Every case runs many times, interleaved
+ * with the others, and the best time is reported.
  *
  * Run with `pnpm build && pnpm bench:native`.
  */
 import { Parser, Text } from "effect-nom"
 import { json } from "../examples/json.ts"
+import { makeJson as makeFastJson } from "../examples/json-fast.ts"
 import { makeJson } from "../examples/json-text.ts"
 
 /** A deterministic PRNG (mulberry32), so every run parses the same documents. */
@@ -76,6 +78,8 @@ const decoder = new TextDecoder()
 const tokenAscii = Parser.compile(json)
 const textString = Parser.compile(makeJson(Text.string))
 const textUtf8 = Parser.compile(makeJson(Text.utf8))
+const fastString = Parser.compile(makeFastJson(Text.string))
+const fastUtf8 = Parser.compile(makeFastJson(Text.utf8))
 
 interface Case {
   readonly name: string
@@ -90,7 +94,9 @@ const casesFor = (doc: Doc): Array<Case> => {
     { name: "Token/Ascii, string", run: () => Parser.parseSync(tokenAscii, text) },
     { name: "Text.string, string", run: () => Parser.parseSync(textString, text) },
     { name: "JSON.parse(TextDecoder(bytes))", run: () => JSON.parse(decoder.decode(bytes)) },
-    { name: "Text.utf8, bytes", run: () => Parser.parseSync(textUtf8, bytes) }
+    { name: "Text.utf8, bytes", run: () => Parser.parseSync(textUtf8, bytes) },
+    { name: "json-fast, Text.string, string", run: () => Parser.parseSync(fastString, text) },
+    { name: "json-fast, Text.utf8, bytes", run: () => Parser.parseSync(fastUtf8, bytes) }
   ]
 }
 

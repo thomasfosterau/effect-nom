@@ -4,6 +4,7 @@ import * as Arithmetic from "../examples/arithmetic.js"
 import * as Http from "../examples/http.js"
 import * as Ini from "../examples/ini.js"
 import * as Json from "../examples/json.js"
+import * as JsonFast from "../examples/json-fast.js"
 import { makeJson } from "../examples/json-text.js"
 import * as Sexpr from "../examples/sexpr.js"
 import { Encoding, Parser, ParserStream, Text } from "../src/index.js"
@@ -71,6 +72,27 @@ describe("examples/json-text", () => {
     const err = expectFailure(json, encode("{\"é\": [1,,2]}"))
     expect(err.position).toEqual({ line: 1, column: 10 })
     expect(err.message).toContain("expected value, found \",\"")
+  })
+})
+
+describe("examples/json-fast", () => {
+  it("agrees with JSON.parse, compiled or not", () => {
+    const docs = [
+      "{\"a\": [1, -2.5e3, true, null], \"b\": {\"c\": \"x\\n\\u00e9\\ud83d\\ude00\"}}",
+      "{\"__proto__\": {\"toString\": 1}, \"a\": 1, \"a\": 2}",
+      "[]", "{}", " [ {} , [ ] ] "
+    ]
+    const compiled = Parser.compile(Parser.named(JsonFast.json, "json-fast"))
+    for (const doc of docs) {
+      expectSuccess(JsonFast.json, doc, JSON.parse(doc))
+      expectSuccess(compiled, doc, JSON.parse(doc))
+    }
+  })
+
+  it("requires a low surrogate after a high one", () => {
+    expectSuccess(JsonFast.json, "\"\\udc00\"", "\udc00")
+    const err = expectFailure(JsonFast.json, "\"\\ud83d\\u0041\"")
+    expect(err.mode).toBe("Cut")
   })
 })
 

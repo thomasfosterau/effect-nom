@@ -8,6 +8,7 @@ import * as Arithmetic from "../examples/arithmetic.js"
 import * as Http from "../examples/http.js"
 import * as Ini from "../examples/ini.js"
 import * as Json from "../examples/json.js"
+import * as JsonFast from "../examples/json-fast.js"
 import { makeJson } from "../examples/json-text.js"
 import * as Sexpr from "../examples/sexpr.js"
 import type { Input } from "../src/index.js"
@@ -196,6 +197,29 @@ describe("compiled examples", () => {
   ] as const)("json-text with %s", (_, T, encode) => {
     const p = makeJson(T as Text.TextParsers<any>)
     for (const input of jsonInputs) same(p, (encode as (s: string) => Input.Input)(input))
+  })
+
+  it.each([
+    ["Text.string", Text.string, (s: string) => s],
+    ["Text.utf8", Text.utf8, (s: string) => Encoding.utf8.encode(s)],
+    ["Text.utf16le", Text.utf16le, (s: string) => Encoding.utf16le.encode(s)]
+  ] as const)("json-fast with %s, accepting what json-text accepts", (_, T, encode) => {
+    const fast = JsonFast.makeJson(T as Text.TextParsers<any>)
+    const text = makeJson(T as Text.TextParsers<any>)
+    const inputs = [
+      ...jsonInputs,
+      "{\"__proto__\": 1, \"toString\": [2], \"constructor\": {\"__proto__\": null}}",
+      "{\"a\": 1, \"a\": 2, \"b\": {\"a\": 3, \"a\": 4}}",
+      "\"\\ud83d\\ude00\\udc00\\u0041\"", "\"\\ud83d\\u0041\"", "\"\\ud83d\"", "\"\\ud83d\\x\""
+    ]
+    for (const input of inputs) {
+      const bytes = (encode as (s: string) => Input.Input)(input)
+      same(fast, bytes)
+      const a = Parser.parse(fast, bytes as never)
+      const b = Parser.parse(text, bytes as never)
+      expect(Result.isSuccess(a), input).toBe(Result.isSuccess(b))
+      if (Result.isSuccess(a) && Result.isSuccess(b)) expect(a.success, input).toEqual(b.success)
+    }
   })
 
   it("json-text on malformed bytes", () => {
