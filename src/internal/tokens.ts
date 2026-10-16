@@ -109,10 +109,25 @@ const compileToken = (u: unknown): (token: unknown) => boolean => {
  */
 export const CodePointPredicate: unique symbol = Symbol.for("effect-nom/CodePointPredicate")
 
-/** Marks `f` as a {@link CodePointPredicate} named `name` (used in error messages). */
-export const codePointPredicate = <F extends (c: string | number) => boolean>(name: string, f: F): F => {
+/**
+ * The code points accepted by a predicate, as sorted, disjoint, inclusive
+ * ranges, when they are known. The compiler turns such predicates into
+ * comparisons or tables.
+ */
+export const PredicateRanges: unique symbol = Symbol.for("effect-nom/PredicateRanges")
+
+/**
+ * Marks `f` as a {@link CodePointPredicate} named `name` (used in error
+ * messages), optionally recording the code point ranges it accepts.
+ */
+export const codePointPredicate = <F extends (c: never) => boolean>(
+  name: string,
+  f: F,
+  ranges?: ReadonlyArray<readonly [number, number]>
+): F => {
   Object.defineProperty(f, "name", { value: name })
   ;(f as any)[CodePointPredicate] = true
+  if (ranges !== undefined) (f as any)[PredicateRanges] = ranges
   return f
 }
 

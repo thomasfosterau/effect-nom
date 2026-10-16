@@ -269,3 +269,203 @@ expected value
   UTF-16 sequence split across chunks of bytes parsed with `Text`.
 - **Unicode text in any encoding** (`Text`, `Encoding`) has no equivalent
   in nom or winnow, whose character parsers are ASCII.
+
+## 6. Compiled parsers
+
+### Why
+
+A `Parser` is a closure over the mutable `State`. A grammar runs as a tree
+of megamorphic closure calls that allocate intermediate values (tuples from
+`seq`, `Option`s from `opt`, `Failure` records on every backtrack). On the
+JSON example the combinators take ~37 ms for a 0.5 MB document, while the
+same grammar fused by hand into straight-line code takes ~4.7 ms. Turning
+off error bookkeeping only saves 0–7%, so the cost is the structure, not the
+diagnostics. Rust gets winnow the fused version through monomorphization and
+inlining; effect-nom has to do it itself.
+
+The approach follows Effect 4's Schema compiler (`SchemaCompiler`,
+`internal/schema/compilerRegistry.ts`, `internal/schema/codegen.ts`,
+`SchemaJITCompiler`): parsers *describe* themselves, a compiler turns
+descriptions into fast code with no diagnostics, the normal runners use it
+transparently, and the interpreter stays the reference implementation that
+produces every error.
+
+### Descriptions
+
+Every parser carries an internal description node next to its `step`
+(`src/internal/node.ts`; the field is not part of the public `Parser`
+interface). Nodes refer to their child *parsers*, so a child's own `step`
+is always available for fallback and recursion is just a reference.
+
+| Node | Built by |
+|---|---|
+| `Succeed`, `Sync`, `Fail(mode)`, `Eof`, `Location` | `succeed`, `empty`, `Do`, `sync`, `fail`, `reject`, `failMessage`, `todo`, `eof`, `location` |
+| `Any`, `Literal(caseless)`, `OneOf(set, negate)`, `Take`, `TakeWhile(set, negate, range)`, `TakeUntil(literal, range)`, `Rest`, `RestLen` | `Token`, `Ascii` classes, `Ascii.caseless`, and the same `Text` parsers |
+| `Escaped(normal, control, escape, raw)` | `Ascii.escaped`/`takeEscaped`, `Text` `escaped`/`takeEscaped` |
+| `TillLineEnding`, `Identifier`, `Bom` | `Ascii.tillLineEnding`, the `Text` parsers of the same names |
+| `Map`, `As`, `Tap`, `TryMap`, `FilterMap`, `Filter`, `FlatMap` | mapping and filtering combinators (`filterOrFail` is a `Filter`) |
+| `Taken`, `WithTaken`, `Span`, `WithSpan` | consumed input |
+| `Mode(from, to)` | `cut`, `backtrack`, `complete` |
+| `Context`, `Expected`, `MapError`, `OrFail` | error management (they only touch diagnostics) |
+| `Opt`, `OrElseSucceed`, `Peek`, `Not` | control |
+| `Seq(parsers, output)`, `Struct`, `ZipWith` | `seq`, `preceded`, `terminated`, `delimited`, `separatedPair` (`output` picks the kept elements), `struct`, `zipWith` |
+| `Alt`, `Dispatch(selector, cases \| choose, otherwise)` | choice |
+| `Repeat(range)`, `Fold(range)`, `RepeatTill`, `Separated`, `SeparatedFold(left \| right)` | repetition |
+| `Suspend` | `suspend` (and `orElse`) |
+| `Service`, `Provide`, `ResumeAfter`, `RetryAfter`, `Trace` | services, recovery, debugging |
+| `Opaque(step)` | `Parser.make`, `gen`, `mapParser`, `permutation`, `Binary`, `Bits`, `Expression`, anything else |
+
+Token nodes have an `encoding` field: `undefined` for `Token`/`Ascii`
+(code points of a string with lenient surrogates, bytes, or array
+elements), or the `Encoding` of a `Text` parser. Token sets are stored as
+the user wrote them; the built-in `Ascii` predicates are annotated with
+their code point ranges so they compile to comparisons.
+
+Describing a grammar costs one small object per combinator call and nothing
+while parsing, so phase 1 changes no behaviour and no timings.
+
+### Opt-in compilation: `Parser.compile`
+
+```ts
+export const json = Parser.compile(Parser.preceded(ws, value))
+Parser.parse(json, text) // compiled on first use, same Result as before
+```
+
+`Parser.compile(p, options?)` registers `p` in a `WeakMap` and returns `p`
+itself, so there is no new parser type and no new runner. The compiled code
+is built lazily on the first run, once per input kind (string, bytes,
+array), and cached. `parse`, `parseSync`, `parsePeek` and `parseEffect` look
+the parser up and use the compiled code when they can.
+
+Compilation is opt-in, not automatic, because:
+
+- **Callbacks may run twice.** When compiled code fails, the interpreter
+  re-runs from the start to build the error (below), so user callbacks
+  (`map`, `filter`, `tryMap`, `tap`, ...) on the path to the failure run
+  again, and callbacks whose results are discarded may be skipped. Schema
+  makes the same trade for its fast path. Pure callbacks can't tell, but a
+  grammar whose callbacks have effects (a `tap` that logs, a `service`
+  holding a symbol table) would change behaviour silently if compilation
+  switched on by itself after N runs. Opting in at the grammar's
+  definition makes it a visible, local decision.
+- **Predictable cost.** Compiling costs time proportional to the grammar.
+  A heuristic ("compile after N runs") makes timings depend on history and
+  hides the cost in a random call; an explicit `compile` is easy to
+  benchmark and reason about, and still free until the first run.
+- **Content Security Policy.** The JIT probes for `new Function`, which a
+  CSP reports as a violation even when the probe is caught. It should only
+  happen when the user asked for compilation.
+- **Ergonomics.** Grammars are module-level constants, so one
+  `Parser.compile(...)` around the root is all it takes. Sub-parsers need
+  nothing.
+
+`options.backend` is `"auto"` (default: the JIT when `new Function` works,
+otherwise the closure compiler), `"jit"` (same, but never silently falls
+back to closures except when unsupported), or `"closure"` (never generates
+code, for CSP environments).
+
+### When the compiled code runs
+
+The runners use compiled code only for complete input without a tracer:
+`parse`, `parseSync`, `parsePeek`, `parseEffect`. `parsePartial`,
+`ParserStream`, `parseRecoverable` and any run with the `trace` option stay
+interpreted. Within those runners `Trace` is an identity, `ResumeAfter` is
+`map(Option.some)` and `RetryAfter` is an identity (recovery is inactive),
+so they compile for free. `Service` and `Provide` read and write
+`state.context` and fall back to their steps.
+
+### Identical results and errors
+
+Compiled code follows the step protocol without diagnostics: it returns a
+value, or `Fail` with only `state.mode` set (`Backtrack`, `Cut` or
+`Incomplete`, because `alt`, `opt`, `cut`, `complete`, ... branch on the
+mode). It allocates no `Failure`, hints, merged expectations or furthest
+failure.
+
+On success (and, for `parse`, with the whole input consumed) the value is
+returned directly. On any failure the runner throws the attempt away and
+re-runs the interpreter on a fresh `State`. The `ParseError` (offset,
+expected, context, cause, message) is therefore the interpreter's, byte for
+byte. The interpreter is also the safety net: if compiled code wrongly
+failed, the re-run returns the right result. The real risk is compiled code
+succeeding where the interpreter fails, or with a different value; the
+differential test suite checks for it.
+
+Documented consequence: user callbacks should be pure. On failing inputs
+they may run twice, callbacks whose result is unused (a `map` inside
+`taken` or `preceded`, a `fold` whose output is discarded) may be skipped,
+and token-set predicates may be cached per character.
+
+### Pipeline
+
+1. **Analysis** (`internal/compiler/analysis.ts`), like Schema's "facts":
+   for a root and an input kind, walk the graph of nodes once (shared nodes
+   and `Suspend` cycles are visited once). For each node record whether the
+   backend supports it natively, a fallback reason when not, whether its
+   output is used, how many parents reference it (shared and recursive nodes
+   become functions), and its *first set*. A node budget (2048) stops the
+   walk; nodes past it fall back to their steps.
+2. **First sets.** For each node: the input units that can start a match,
+   and a mode, `strict` (on any other unit, or at the end, the node fails
+   with `Backtrack`), `optional` (it fails with `Backtrack` or succeeds
+   without consuming) or `unknown`. `cut` makes a strict node unknown, `opt`
+   makes it optional, `Seq` combines its prefix. An `Alt` whose branches are
+   strict becomes a switch on the next unit that only tries the branches
+   that can match it, in order. A `Dispatch` with a record of cases on
+   `Token.any` or `peek(any)` becomes a switch on the unit, without building
+   the key string.
+3. **Token sets** compile to comparisons for a few ranges and to a 256-entry
+   table plus a fallback test otherwise. Predicates without known ranges are
+   called, with a per-character cache for ASCII (string predicates receive a
+   cached one-character string).
+4. **Specialization** per input kind and encoding: strings use
+   `charCodeAt`, bytes index the `Uint8Array`, `Text` parsers inline their
+   encoding's single-unit fast path (below 0xD800 for strings, 0x80 for
+   UTF-8, 0x100 for Latin-1) and call `decode` only for longer sequences.
+   Array inputs keep the combinator structure but run token parsers through
+   their steps.
+5. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
+   elements of `preceded`/`terminated`/`delimited`/`separatedPair`, `as`,
+   `asVoid` and `opt` in void position compile without building their
+   values. `Seq` and `Struct` build their results directly.
+
+### Backends
+
+**(a) Closure compiler** (`internal/compiler/closure.ts`). Builds one
+specialized closure per node, with the step signature, so `Opaque` nodes
+are simply their own steps and the cursor is `state.pos` throughout. It
+never generates code, so it works under a CSP.
+
+**(b) JIT** (`internal/compiler/jit.ts`). Emits one JavaScript function per
+rule (the root, every `Suspend` target, and shared nodes) and inlines
+everything else as straight-line code with labelled blocks for failure.
+The cursor is a local `p`; a rule returns its value and leaves the new
+position in a register. The input and end are hoisted into locals.
+Callbacks, sets and steps are passed in a constants array. `Opaque` nodes
+store `p` in `state.pos`, call the step and reload it. Generation is
+guarded: `new Function` is probed once, and if it or the generated code
+fails to build, the parser uses the closure compiler. The entry point saves
+and restores its registers, so a callback that runs another compiled parse
+is safe.
+
+**(c) AOT** (later, optional): the JIT's emitter can write the same source
+into a static module that registers the compiled function for a parser,
+as `SchemaAOTCompiler` does.
+
+### Fallbacks
+
+Anything the analysis can't compile runs its interpreted `step` on the same
+`State`, with `state.pos` kept in sync: `Opaque`, `FlatMap` continuations
+(the first parser is compiled; the parser returned by the function runs
+interpreted), `Dispatch` with a function of cases, `Service`, `Provide`,
+`Text` `caseless`, `identifier`, `bom` and `tillLineEnding` (leaf steps,
+so the fallback costs a call), and nodes past the budget. Partial input,
+recovery and tracing are handled by the runner as described above.
+
+### Testing
+
+A differential suite runs every example grammar, compiled with each
+backend and interpreted, on generated inputs (valid documents, random
+mutations, truncations, invalid bytes) and requires the same `Result`:
+equal values, or `ParseError`s with equal offset, mode, expected, context,
+cause and message.

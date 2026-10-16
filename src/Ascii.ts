@@ -22,6 +22,7 @@
  * @since 0.1.0
  */
 import * as Result from "effect/Result"
+import type { Encoding } from "./Encoding.js"
 import type { Input, Slice, State } from "./Input.js"
 import { Fail } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
@@ -47,7 +48,7 @@ const code = (c: string | number): number => typeof c === "number" ? c : c.charC
 export const isAlpha: (c: string | number) => boolean = codePointPredicate("isAlpha", (c: string | number): boolean => {
   const x = code(c)
   return (x >= 65 && x <= 90) || (x >= 97 && x <= 122)
-})
+}, [[65, 90], [97, 122]])
 
 /**
  * `[0-9]`
@@ -58,7 +59,7 @@ export const isAlpha: (c: string | number) => boolean = codePointPredicate("isAl
 export const isDigit: (c: string | number) => boolean = codePointPredicate("isDigit", (c: string | number): boolean => {
   const x = code(c)
   return x >= 48 && x <= 57
-})
+}, [[48, 57]])
 
 /**
  * `[0-9a-fA-F]`
@@ -69,7 +70,7 @@ export const isDigit: (c: string | number) => boolean = codePointPredicate("isDi
 export const isHexDigit: (c: string | number) => boolean = codePointPredicate("isHexDigit", (c: string | number): boolean => {
   const x = code(c)
   return (x >= 48 && x <= 57) || (x >= 65 && x <= 70) || (x >= 97 && x <= 102)
-})
+}, [[48, 57], [65, 70], [97, 102]])
 
 /**
  * `[0-7]`
@@ -80,7 +81,7 @@ export const isHexDigit: (c: string | number) => boolean = codePointPredicate("i
 export const isOctDigit: (c: string | number) => boolean = codePointPredicate("isOctDigit", (c: string | number): boolean => {
   const x = code(c)
   return x >= 48 && x <= 55
-})
+}, [[48, 55]])
 
 /**
  * `[0-9a-zA-Z]`
@@ -88,7 +89,11 @@ export const isOctDigit: (c: string | number) => boolean = codePointPredicate("i
  * @since 0.1.0
  * @category predicates
  */
-export const isAlphanumeric: (c: string | number) => boolean = codePointPredicate("isAlphanumeric", (c: string | number): boolean => isAlpha(c) || isDigit(c))
+export const isAlphanumeric: (c: string | number) => boolean = codePointPredicate(
+  "isAlphanumeric",
+  (c: string | number): boolean => isAlpha(c) || isDigit(c),
+  [[48, 57], [65, 90], [97, 122]]
+)
 
 /**
  * `[ \t]`
@@ -99,7 +104,7 @@ export const isAlphanumeric: (c: string | number) => boolean = codePointPredicat
 export const isSpace: (c: string | number) => boolean = codePointPredicate("isSpace", (c: string | number): boolean => {
   const x = code(c)
   return x === 32 || x === 9
-})
+}, [[9, 9], [32, 32]])
 
 /**
  * `[ \t\r\n]`
@@ -110,7 +115,7 @@ export const isSpace: (c: string | number) => boolean = codePointPredicate("isSp
 export const isMultispace: (c: string | number) => boolean = codePointPredicate("isMultispace", (c: string | number): boolean => {
   const x = code(c)
   return x === 32 || x === 9 || x === 10 || x === 13
-})
+}, [[9, 10], [13, 13], [32, 32]])
 
 /**
  * `\n`
@@ -118,7 +123,7 @@ export const isMultispace: (c: string | number) => boolean = codePointPredicate(
  * @since 0.1.0
  * @category predicates
  */
-export const isNewline: (c: string | number) => boolean = codePointPredicate("isNewline", (c: string | number): boolean => code(c) === 10)
+export const isNewline: (c: string | number) => boolean = codePointPredicate("isNewline", (c: string | number): boolean => code(c) === 10, [[10, 10]])
 
 // Token sets usable for both string and byte input
 const alphaSet = [range("a", "z"), range("A", "Z")]
@@ -296,7 +301,7 @@ const expectedLineEnding = ["line ending"]
  * @since 0.1.0
  * @category line endings
  */
-export const tillLineEnding: Parser<string> = P.make<string>((state: State<any>) => {
+export const tillLineEnding: Parser<string> = P.described<string>((state: State<any>) => {
   const start = state.pos
   const input = state.input
   const isString = state.inputKind === 0
@@ -318,7 +323,7 @@ export const tillLineEnding: Parser<string> = P.make<string>((state: State<any>)
   if (i >= state.end && state.partial) return state.incomplete(1, expectedLineEnding)
   state.pos = i
   return state.slice(start, i) as string
-}, "tillLineEnding")
+}, "tillLineEnding", { _tag: "TillLineEnding", encoding: undefined })
 
 // -----------------------------------------------------------------------------
 // Numbers
@@ -487,7 +492,7 @@ export const takeEscaped = <A, E, R, I extends Input, B, E2, R2, I2 extends Inpu
     if (!atControl(state, ctrl)) return false
     state.pos++
     return true
-  }, escapable, (state, start) => state.slice(start, state.pos) as Slice<I & I2>)
+  }, escapable, (state, start) => state.slice(start, state.pos) as Slice<I & I2>, ctrl, undefined)
 }
 
 /** @internal */
@@ -495,11 +500,13 @@ export const takeEscapedImpl = <A, E, R, I extends Input, B, E2, R2, I2 extends 
   normal: Parser<A, E, R, I>,
   matchControl: (state: State<any>) => boolean,
   escapable: Parser<B, E2, R2, I2>,
-  slice: (state: State<any>, start: number) => S
+  slice: (state: State<any>, start: number) => S,
+  control: number,
+  encoding: Encoding<any> | undefined
 ): Parser<S, E | E2, R | R2, I & I2> => {
   const normalStep = normal.step
   const escStep = escapable.step
-  return P.make((state: State<any>) => {
+  return P.described((state: State<any>) => {
     const start = state.pos
     while (state.pos < state.end) {
       const before = state.pos
@@ -518,7 +525,7 @@ export const takeEscapedImpl = <A, E, R, I extends Input, B, E2, R2, I2 extends 
     }
     if (state.partial) return state.incomplete(0)
     return slice(state, start)
-  }, "takeEscaped")
+  }, "takeEscaped", { _tag: "Escaped", normal, control, escape: escapable, raw: true, encoding })
 }
 
 /**
@@ -559,18 +566,20 @@ export const escaped = <E, R, I extends Input, E2, R2, I2 extends Input>(
     if (!atControl(state, ctrl)) return false
     state.pos++
     return true
-  }, escape)
+  }, escape, ctrl, undefined)
 }
 
 /** @internal */
 export const escapedImpl = <E, R, I extends Input, E2, R2, I2 extends Input>(
   normal: Parser<string, E, R, I>,
   matchControl: (state: State<any>) => boolean,
-  escape: Parser<string, E2, R2, I2>
+  escape: Parser<string, E2, R2, I2>,
+  control: number,
+  encoding: Encoding<any> | undefined
 ): Parser<string, E | E2, R | R2, I & I2> => {
   const normalStep = normal.step
   const escStep = escape.step
-  return P.make((state: State<any>) => {
+  return P.described((state: State<any>) => {
     let out = ""
     while (state.pos < state.end) {
       const before = state.pos
@@ -595,7 +604,7 @@ export const escapedImpl = <E, R, I extends Input, E2, R2, I2 extends Input>(
     }
     if (state.partial) return state.incomplete(0)
     return out
-  }, "escaped")
+  }, "escaped", { _tag: "Escaped", normal, control, escape, raw: false, encoding })
 }
 
 // -----------------------------------------------------------------------------
