@@ -58,11 +58,11 @@ const grammars = [
 for (const [group, grammar, input] of grammars) {
   for (const backend of backends) {
     const p = variant(grammar as Parser.Parser<unknown, never, never, any>, backend)
-    cases.push({ group, name: backend, run: () => Parser.parseSync(p, input) })
+    cases.push({ group, name: backend === "auto" ? "jit (auto)" : backend, run: () => Parser.parseSync(p, input) })
   }
 }
 const jsonString = variant(makeJson(Text.string), "auto")
-cases.push({ group: "references", name: "TextDecoder + Text.string (auto)", run: () => Parser.parseSync(jsonString, decoder.decode(utf8)) })
+cases.push({ group: "references", name: "TextDecoder + Text.string (jit)", run: () => Parser.parseSync(jsonString, decoder.decode(utf8)) })
 cases.push({ group: "references", name: "hand-fused, string", run: () => parseFused(doc) })
 cases.push({ group: "references", name: "JSON.parse", run: () => JSON.parse(doc) })
 

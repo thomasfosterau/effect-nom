@@ -16,7 +16,7 @@ import { State } from "../src/Input.js"
 import { Fail } from "../src/Input.js"
 import * as Registry from "../src/internal/compiler/registry.js"
 
-const backends = ["closure"] as const
+const backends = ["closure", "auto"] as const
 type Backend = typeof backends[number]
 
 // -----------------------------------------------------------------------------
@@ -46,6 +46,7 @@ const outcome = (r: Result.Result<unknown, any>) =>
   Result.isSuccess(r) ? { ok: true, value: r.success } : { ok: false, error: errorFields(r.failure) }
 
 const compiledCopy = new Map<string, Map<Parser.Parser.Any, Parser.Parser.Any>>()
+const backendOf = new Map<Parser.Parser.Any, Backend>()
 
 /** A compiled twin of `p` (with the same description), leaving `p` interpreted. */
 const twin = <P extends Parser.Parser.Any>(p: P, backend: Backend): P => {
@@ -55,6 +56,7 @@ const twin = <P extends Parser.Parser.Any>(p: P, backend: Backend): P => {
   if (c === undefined) {
     c = Parser.compile(Parser.named(p, p.name ?? "root"), { backend })
     byParser.set(p, c)
+    backendOf.set(c, backend)
   }
   return c as P
 }
@@ -66,6 +68,8 @@ const fast = (p: Parser.Parser.Any, input: Input.Input, context?: Context.Contex
   const kind = state.inputKind
   const compiled = Registry.compiled(p, kind)!
   if (compiled.error !== undefined) throw compiled.error
+  if (compiled.jitError !== undefined) throw compiled.jitError
+  if (backendOf.get(p) === "auto") expect(compiled.backend).toBe("jit")
   const a = step(state)
   return a === Fail ? undefined : { value: a, pos: state.pos, end: state.end }
 }
@@ -396,6 +400,20 @@ describe("compiled combinators", () => {
     }
   })
 
+  it("escapes whose normal part can match nothing", () => {
+    const p = Parser.seq(
+      Parser.opt(Ascii.takeEscaped(Ascii.alpha0, "\\", Token.oneOf("an"))),
+      Ascii.escaped(Ascii.alpha0, "\\", Token.literal("n").pipe(Parser.as("\n"))),
+      Token.rest
+    )
+    for (const input of allStrings(["a", "\\", "n", "0"], 4)) same(p, input)
+  })
+
+  it("caseless literals with other characters", () => {
+    const p = Parser.seq(Parser.opt(Ascii.caseless("+0a")), Parser.opt(Ascii.caseless("@")), Token.rest)
+    for (const input of allStrings(["+", "\u000b", "0", "\u0010", "a", "A", "@", "`"], 3)) same(p, input)
+  })
+
   it("array inputs", () => {
     const p = Parser.separated(Token.oneOf<ReadonlyArray<string>>(["x", "y"]), Token.literal(["+"]))
     for (const input of allStrings(["x", "y", "+", "z"], 5)) same(p as any, Array.from(input))
@@ -417,16 +435,19 @@ describe("compiled combinators", () => {
 // Behaviour of Parser.compile
 // -----------------------------------------------------------------------------
 
-describe("Parser.compile", () => {
+describe.each(backends)("Parser.compile with the %s backend", (backend) => {
   it("returns the same parser, and is pipeable", () => {
     const p = Parser.repeat(a)
-    expect(Parser.compile(p)).toBe(p)
-    expect(p.pipe(Parser.compile({ backend: "closure" }))).toBe(p)
+    expect(Parser.compile(p, { backend })).toBe(p)
+    const q = Parser.repeat(b)
+    expect(q.pipe(Parser.compile({ backend }))).toBe(q)
+    expect(Parser.parse(q, "bb")).toEqual(Result.succeed(["b", "b"]))
+    expect(Registry.compiled(q, 0)!.backend).toBe(backend === "auto" ? "jit" : "closure")
   })
 
   it("re-runs the interpreter for errors, so callbacks may run twice", () => {
     let calls = 0
-    const p = Parser.compile(Parser.terminated(digit.pipe(Parser.tap(() => calls++)), b), { backend: "closure" })
+    const p = Parser.compile(Parser.terminated(digit.pipe(Parser.tap(() => calls++)), b), { backend })
     expect(Result.isSuccess(Parser.parse(p, "1b"))).toBe(true)
     expect(calls).toBe(1)
     calls = 0
@@ -437,7 +458,7 @@ describe("Parser.compile", () => {
 
   it("stays interpreted with tracing and recovery", () => {
     const events: Array<string> = []
-    const p = Parser.compile(Parser.trace(Parser.resumeAfter(a, Token.any), "t"), { backend: "closure" })
+    const p = Parser.compile(Parser.trace(Parser.resumeAfter(a, Token.any), "t"), { backend })
     Parser.parse(p, "a", { trace: (e) => events.push(e._tag) })
     expect(events).toEqual(["Enter", "Exit"])
     const r = Parser.parseRecoverable(p, "x")
@@ -445,18 +466,46 @@ describe("Parser.compile", () => {
   })
 
   it("is safe to re-enter from a callback", () => {
-    const inner = Parser.compile(Parser.repeat(digit), { backend: "closure" })
+    const inner = Parser.compile(Parser.repeat(digit), { backend })
     const outer = Parser.compile(
       Parser.separated(Token.takeWhile("0123456789", { min: 1 }).pipe(Parser.map((s) => Parser.parseSync(inner, s).length)), b),
-      { backend: "closure" }
+      { backend }
     )
     expect(Parser.parseSync(outer, "12b345")).toEqual([2, 3])
   })
 
   it("reports what runs interpreted in the JSON grammar", () => {
-    const p = twin(Json.json, "closure")
+    const p = twin(Json.json, backend)
     Parser.parse(p, "1")
     const fallbacks = Registry.compiled(p, 0)!.fallbacks
     expect(fallbacks.map((f) => f.tag)).toEqual(["FlatMap"])
+  })
+
+  it("runs a state whose end is not the input's length", () => {
+    const p = Parser.compile(Parser.repeat(a), { backend })
+    Parser.parse(p, "")
+    const state = new State("aaa")
+    state.end = 2
+    expect(Registry.stepFor(p, state)!(state)).toEqual(["a", "a"])
+  })
+})
+
+describe("the JIT", () => {
+  it("falls back to the closure compiler where new Function is blocked", () => {
+    const original = globalThis.Function
+    const blocked = function() {
+      throw new EvalError("Refused to evaluate a string as JavaScript")
+    } as unknown as FunctionConstructor
+    globalThis.Function = blocked
+    try {
+      const p = Parser.compile(Parser.repeat(a))
+      expect(Parser.parse(p, "aa")).toEqual(Result.succeed(["a", "a"]))
+      expect(Registry.compiled(p, 0)!.backend).toBe("closure")
+    } finally {
+      globalThis.Function = original
+    }
+    const q = Parser.compile(Parser.repeat(a))
+    Parser.parse(q, "a")
+    expect(Registry.compiled(q, 0)!.backend).toBe("jit")
   })
 })

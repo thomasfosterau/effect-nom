@@ -6,6 +6,7 @@ import type { State } from "../../Input.js"
 import type { ParserLike } from "../node.js"
 import type { Fallback, Step } from "./closure.js"
 import { compileClosure } from "./closure.js"
+import { compileJit, jitSupported } from "./jit.js"
 
 /** Which compiler to use. */
 export type Backend = "auto" | "closure"
@@ -19,6 +20,10 @@ export interface Compiled {
   readonly fallbacks: ReadonlyArray<Fallback>
   /** Why compilation failed, if it did (the parser then runs interpreted). */
   readonly error: unknown
+  /** Why the JIT failed, if it did (the closure compiler is then used). */
+  readonly jitError?: unknown
+  /** The generated source, for the JIT. */
+  readonly source?: string
 }
 
 interface Entry {
@@ -35,7 +40,20 @@ export const register = (p: ParserLike, backend: Backend): void => {
 
 export const isRegistered = (p: ParserLike): boolean => registry.has(p)
 
-const build = (p: ParserLike, kind: 0 | 1 | 2, _backend: Backend): Compiled => {
+const build = (p: ParserLike, kind: 0 | 1 | 2, backend: Backend): Compiled => {
+  if (backend === "auto" && jitSupported()) {
+    try {
+      const { fallbacks, source, step } = compileJit(p, kind)
+      return { backend: "jit", step, fallbacks, error: undefined, source }
+    } catch (error) {
+      // Fall back to the closure compiler, remembering why
+      return { ...buildClosure(p, kind), jitError: error }
+    }
+  }
+  return buildClosure(p, kind)
+}
+
+const buildClosure = (p: ParserLike, kind: 0 | 1 | 2): Compiled => {
   try {
     const { fallbacks, step } = compileClosure(p, kind)
     return { backend: "closure", step, fallbacks, error: undefined }

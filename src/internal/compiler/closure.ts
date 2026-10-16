@@ -1253,6 +1253,24 @@ const stringLiteral = (str: string, value: unknown): Step => {
   }
 }
 
+/** A closure compiler for one input kind; it memoizes what it compiles. */
+export interface ClosureCompiler {
+  readonly compile: (p: ParserLike, used: boolean) => Step
+  readonly note: (p: ParserLike, node: Node, reason: string) => void
+  readonly firsts: FirstSets
+  readonly fallbacks: ReadonlyArray<Fallback>
+}
+
+export const createClosureCompiler = (kind: 0 | 1 | 2): ClosureCompiler => {
+  const compiler = new Compiler(kind)
+  return {
+    compile: (p, used) => compiler.compile(p, used),
+    note: (p, node, reason) => compiler.note(p, node, reason),
+    firsts: compiler.firsts,
+    fallbacks: compiler.fallbacks
+  }
+}
+
 /** Compiles a root parser for one input kind. */
 export const compileClosure = (
   root: ParserLike,

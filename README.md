@@ -212,8 +212,12 @@ written or what it returns:
 ```ts
 export const json = Parser.compile(Parser.preceded(ws, value))
 
-Parser.parse(json, text) // same Result as before, several times faster
+Parser.parse(json, text) // same Result as before, about 5 times faster
 ```
+
+On the JSON example, compiled parsing runs at 4.6–5.3 times the speed of
+the interpreter, for strings, UTF-8 and UTF-16 alike (see
+[the design notes](docs/DESIGN.md#results)).
 
 `compile` returns the same parser. The code is built on the first run, for
 each kind of input, and cached. `parse`, `parseSync`, `parsePeek` and
