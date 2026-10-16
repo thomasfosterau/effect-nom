@@ -414,6 +414,53 @@ describe("compiled combinators", () => {
     for (const input of allStrings(["+", "\u000b", "0", "\u0010", "a", "A", "@", "`"], 3)) same(p, input)
   })
 
+  // Sets compile to comparisons on their accepted or rejected ranges, or to a
+  // table: every code unit up to 0x103 crosses each boundary
+  it("token sets at their boundaries", () => {
+    const sets: ReadonlyArray<unknown> = [
+      ["\"\\", Token.range("\u0000", "\u001f")],
+      Token.range("a", "z"),
+      Token.range(" ", "~"),
+      [Token.range("0", "9"), Token.range("A", "F"), Token.range("a", "f")],
+      Token.range("\u0080", "ÿ"),
+      Token.range("\u0000", "\u007f"),
+      [Token.range("a", "ÿ"), "_"],
+      [Token.range("\u0001", "~"), "ÿ"],
+      "acegikmoq",
+      // Cheaper to test by the rejected units, up to the end of the table
+      [Token.range("\u0000", "\t"), Token.range("\u000b", "\u00c7")],
+      [Token.range("\u0000", "\t"), Token.range("\u000b", "c")],
+      [Token.range("\u0000", "\t"), Token.range("\u000b", "\u0013"), Token.range("\u001e", "'"), Token.range(")", "\u00ff")],
+      (c: string) => c > "m" && c !== "x"
+    ]
+    const units = Array.from({ length: 0x104 }, (_, i) => String.fromCharCode(i))
+    const inputs = [...units.map((c) => `${c}${c}a`), "é😀", "😀\u0000", "\ud800a", "Āÿ"]
+    for (const set of sets) {
+      const token = Parser.seq(
+        Parser.opt(Token.oneOf(set as never)),
+        Parser.opt(Token.noneOf(set as never)),
+        Token.takeWhile(set as never),
+        Token.takeTill(set as never, { max: 2 })
+      )
+      for (const input of inputs) same(token, input)
+      const bytes = Parser.seq(Token.takeWhile<Uint8Array>(set as never), Token.takeTill<Uint8Array>(set as never))
+      for (let b = 0; b < 256; b++) same(bytes as any, new Uint8Array([b, b, 0x61]))
+      for (const T of [Text.string, Text.utf8, Text.latin1] as ReadonlyArray<Text.TextParsers<any>>) {
+        const text = Parser.seq(
+          Parser.opt(T.oneOf(set as never)),
+          Parser.opt(T.noneOf(set as never)),
+          T.takeWhile(set as never),
+          T.takeTill(set as never, { max: 2 })
+        )
+        for (const input of inputs) {
+          if (T === Text.latin1 && /[^\u0000-ÿ]/.test(input)) continue
+          if (T === Text.utf8 && /[\ud800-\udfff]/.test(input.replace("😀", ""))) continue
+          same(text, (T.encoding as Encoding.Encoding<any>).encode(input))
+        }
+      }
+    }
+  })
+
   it("array inputs", () => {
     const p = Parser.separated(Token.oneOf<ReadonlyArray<string>>(["x", "y"]), Token.literal(["+"]))
     for (const input of allStrings(["x", "y", "+", "z"], 5)) same(p as any, Array.from(input))

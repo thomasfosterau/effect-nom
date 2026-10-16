@@ -20,13 +20,13 @@ import type { State } from "../../Input.js"
 import { Fail } from "../../Input.js"
 import type { Node, NodeOf, ParserLike } from "../node.js"
 import { children, nodeOf } from "../node.js"
-import { charOf, fastLimit, utf16be, utf16le, validate } from "../text.js"
+import { charOf, fastLimit, latin1, string, utf16be, utf16le, utf8, validate } from "../text.js"
 import type { ClosureCompiler, Fallback, Step } from "./closure.js"
 import { createClosureCompiler } from "./closure.js"
 import type { First } from "./first.js"
 import { planAlt, Strict } from "./first.js"
 import type { CharSet } from "./sets.js"
-import { kindOfEncoding, TableSize, textSet, tokenSet } from "./sets.js"
+import { kindOfEncoding, reachesAbove, TableSize, textSet, tokenSet } from "./sets.js"
 
 /** Helpers available to generated code as `R`. */
 const runtime = {
@@ -67,6 +67,8 @@ export const jitSupported = (): boolean => {
 }
 
 const BT = `$S.mode="Backtrack";`
+
+const builtinEncodings: ReadonlySet<Encoding<any>> = new Set([string, utf8, utf16le, utf16be, latin1])
 
 /** How generated code reads the code units of an encoding (see `Emitter.reader`). */
 interface Reader {
@@ -119,6 +121,48 @@ const rangeTest = (runs: ReadonlyArray<readonly [number, number]>, v: string): s
   if (runs.length === 0) return "false"
   if (runs.length > 4) return undefined
   return runs.map(([a, b]) => a === b ? `${v}===${a}` : `(${v}>=${a}&&${v}<=${b})`).join("||")
+}
+
+/** The inclusive ranges of `[0, size)` where `table[c] === value`. */
+const runsWhere = (table: Uint8Array, size: number, value: 0 | 1): Array<[number, number]> => {
+  const out: Array<[number, number]> = []
+  for (let i = 0; i < size; i++) {
+    if (table[i] !== value) continue
+    let j = i
+    while (j + 1 < size && table[j + 1] === value) j++
+    out.push([i, j])
+    i = j
+  }
+  return out
+}
+
+/** How many comparisons it takes to test a run of `[0, size)`. */
+const runCost = ([a, b]: readonly [number, number], size: number): number =>
+  a === b || a === 0 || b === size - 1 ? 1 : 2
+
+/**
+ * A JavaScript expression testing whether `v`, known to be in `[0, size)`,
+ * is accepted by `table`, or `undefined` if that takes too many comparisons.
+ * It tests the accepted runs or the rejected ones, whichever is cheaper:
+ * `c!==34&&c!==92&&c>=32` rather than three two-sided ranges.
+ */
+const tableTest = (table: Uint8Array, v: string, size: number): string | undefined => {
+  const accept = runsWhere(table, size, 1)
+  const reject = runsWhere(table, size, 0)
+  if (accept.length === 0) return "false"
+  if (reject.length === 0) return "true"
+  const cost = (runs: ReadonlyArray<readonly [number, number]>) => runs.reduce((n, r) => n + runCost(r, size), 0)
+  const acceptCost = cost(accept)
+  const rejectCost = cost(reject)
+  if (Math.min(acceptCost, rejectCost) > 6) return undefined
+  const terms = acceptCost <= rejectCost
+    ? accept.map(([a, b]) =>
+      a === b ? `${v}===${a}` : a === 0 ? `${v}<=${b}` : b === size - 1 ? `${v}>=${a}` : `(${v}>=${a}&&${v}<=${b})`
+    ).join("||")
+    : reject.map(([a, b]) =>
+      a === b ? `${v}!==${a}` : a === 0 ? `${v}>${b}` : b === size - 1 ? `${v}<${a}` : `(${v}<${a}||${v}>${b})`
+    ).join("&&")
+  return `(${terms})`
 }
 
 class Emitter {
@@ -580,16 +624,37 @@ class Emitter {
   // Tokens
   // ---------------------------------------------------------------------------
 
-  /** An expression: is the small unit `c` (below `TableSize`) accepted? */
-  private member(accept: Uint8Array, c: string): string {
-    const runs = runsOf(accept)
-    return rangeTest(runs, c) ?? `${this.const(accept)}[${c}]===1`
+  /** An expression: is the unit `c`, known to be below `size` (at most `TableSize`), accepted? */
+  private member(accept: Uint8Array, c: string, size: number = TableSize): string {
+    return tableTest(accept, c, size) ?? `${this.const(accept)}[${c}]===1`
   }
 
   /** An expression: is the code point `c` (at least `TableSize`) accepted? */
   private memberHigh(set: CharSet, negate: boolean, c: string): string {
     if (set.ranges !== undefined && !set.ranges.some(([, b]) => b >= TableSize)) return negate ? "true" : "false"
     return `${this.const(set.test)}(${c})!==${negate}`
+  }
+
+  /**
+   * An expression: does a `Text` set accept the unit `c`, known to be below
+   * `r.fast`? Code points from `TableSize` up are tested by the set's
+   * function, unless its ranges show they are all rejected.
+   */
+  private textAccepts(r: Reader, cs: CharSet, accept: Uint8Array, negate: boolean, c: string): string {
+    if (r.fast <= TableSize) return `(${this.member(accept, c, r.fast)})`
+    const member = this.member(accept, c)
+    if (reachesAbove(cs, TableSize)) return `(${c}<${TableSize}?${member}:${this.const(cs.test)}(${c})!==${negate})`
+    return negate ? `(${c}>=${TableSize}||${member})` : `(${c}<${TableSize}&&${member})`
+  }
+
+  /**
+   * An expression: does a `Text` set reject `c`, a code point that `decode`
+   * returned? The built-in encodings only decode code points from `r.fast`
+   * up there.
+   */
+  private textRejectsDecoded(enc: Encoding<any>, r: Reader, cs: CharSet, negate: boolean, c: string): string {
+    if (r.fast > 0 && builtinEncodings.has(enc) && !reachesAbove(cs, r.fast)) return String(!negate)
+    return `${this.const(cs.test)}(${c})===${negate}`
   }
 
   token(
@@ -663,15 +728,11 @@ class Emitter {
             `if(${cp}>65535){${set(value("2"))}p+=2}else{${set("I[p]")}p++}}`
         }
         const r = this.reader(enc)
-        const test = this.const(cs.test)
-        const accepts = r.fast > TableSize
-          ? `(${c}<${TableSize}?${this.member(accept, c)}:${test}(${c})!==${negate})`
-          : `(${this.member(accept, c)})`
         return `if(p>=E)${failBT}` +
           (r.fast > 0
-            ? `if(${r.guard("p")}&&(${c}=${r.unit("p")})<${r.fast}){if(!${accepts})${failBT}${set(`R.charOf(${c})`)}p+=${r.width}}else`
+            ? `if(${r.guard("p")}&&(${c}=${r.unit("p")})<${r.fast}){if(!${this.textAccepts(r, cs, accept, negate, c)})${failBT}${set(`R.charOf(${c})`)}p+=${r.width}}else`
             : "") +
-          `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${test}(${c})===${negate})${failBT}` +
+          `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${this.textRejectsDecoded(enc, r, cs, negate, c)})${failBT}` +
           `${set(`R.charOf(${c})`)}p+=${this.const(enc.width)}(${c})}`
       }
       case "TakeWhile":
@@ -730,13 +791,13 @@ class Emitter {
     if (enc !== undefined) {
       // Text: inline the encoding's single-unit code points, decode the rest
       const r = this.reader(enc)
-      const test = this.const(cs.test)
-      const accepts = r.fast > TableSize
-        ? `(${c}<${TableSize}?${member}:${test}(${c})!==${negate})`
-        : `(${member})`
+      // The loop condition already checks a unit of width 1
+      const guard = r.width === 1 ? "" : `${r.guard("p")}&&`
       return `${st}=p;${counted ? `${n}=0;` : ""}${loop}:while(p<E${bound}){` +
-        (r.fast > 0 ? `if(${r.guard("p")}&&(${c}=${r.unit("p")})<${r.fast}){if(!${accepts})break ${loop};p+=${r.width}}else` : "") +
-        `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${test}(${c})===${negate})break ${loop};` +
+        (r.fast > 0
+          ? `if(${guard}(${c}=${r.unit("p")})<${r.fast}){if(!${this.textAccepts(r, cs, accept, negate, c)})break ${loop};p+=${r.width}}else`
+          : "") +
+        `{${c}=${this.const(enc.decode)}(I,p,E);if(${c}<0||${this.textRejectsDecoded(enc, r, cs, negate, c)})break ${loop};` +
         `p+=${this.const(enc.width)}(${c})}${count}}${finish}`
     }
     const fast = 0xd800
@@ -745,8 +806,13 @@ class Emitter {
     // Token on strings: code points, with lenient surrogates
     const cp = this.v(fn)
     const never = highTest(c) === "false"
+    // Every code point from `TableSize` up is accepted: without a count,
+    // surrogate pairs can be skipped a unit at a time
+    const always = highTest(c) === "true"
     const rest = never && !negate
       ? `break;`
+      : always && !counted
+      ? `p++;`
       : `if(${c}<${fast}||${c}>56319){if(!(${highTest(c)}))break ${loop};p++}` +
         `else{${cp}=${c};if(p+1<I.length){const d=I.charCodeAt(p+1);if((d&64512)===56320)${cp}=((${c}-55296)<<10)+(d-56320)+65536}` +
         `if(!(${highTest(cp)}))break ${loop};p+=${cp}>65535?2:1}`
