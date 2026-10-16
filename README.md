@@ -516,7 +516,9 @@ pnpm install
 pnpm check   # type-check sources, tests and examples
 pnpm test    # run the test suite
 pnpm build   # emit dist/
-pnpm bench:stream   # parsing a fetch body as it downloads vs Response.json() (after a build)
+pnpm bench          # JSON example: interpreted vs compiled, per encoding (after a build)
+pnpm bench:native   # compiled JSON parser vs JSON.parse on several document shapes
+pnpm bench:stream   # parsing a fetch body as it downloads vs Response.json()
 ```
 
 ## License
