@@ -307,6 +307,31 @@ Stream.make("1\n2", "3\n", "4\n").pipe(ParserStream.parseMany(line), Stream.runC
 // Effect<[1, 23, 4], ParseError<string>>
 ```
 
+### Parsing a download as it arrives
+
+`ParserStream.parseAll` parses a stream as one document, and does not wait
+for it to end: each chunk is parsed as it arrives. When the input runs out
+mid-way, repetitions (`repeat`, `separated`, `fold`, `escaped`, ...)
+remember how far they got, so the next attempt carries on from there rather
+than starting over. `parseResponse` and `parseReadable` do the same for web
+streams, so the body of a `fetch` response is parsed straight from its
+bytes, without decoding it first or waiting for the download:
+
+```ts
+import { Effect } from "effect"
+import { Parser, ParserStream, Text } from "effect-nom"
+
+const json = Parser.compile(makeJson(Text.utf8)) // see examples/json-text.ts
+
+const value = await Effect.runPromise(ParserStream.parseResponse(await fetch(url), json))
+```
+
+The result, and any error, is the same as parsing the whole body at once.
+Compiled parsers stream compiled. With the JSON example on a 2 MB document,
+`parseResponse` returns about 1 ms after the last byte at 10 MB/s, and keeps
+pace with `Response.json()` at 25 MB/s; on faster connections the native
+parser is quicker (`pnpm bench:stream`).
+
 ## Services
 
 Parsers can require Effect services. These replace winnow's `Stateful`
@@ -493,6 +518,7 @@ pnpm test    # run the test suite
 pnpm build   # emit dist/
 pnpm bench          # JSON example: interpreted vs compiled, per encoding (after a build)
 pnpm bench:native   # compiled JSON parser vs JSON.parse on several document shapes
+pnpm bench:stream   # parsing a fetch body as it downloads vs Response.json()
 ```
 
 ## License

@@ -20,6 +20,7 @@ import type { State } from "../../Input.js"
 import { Fail } from "../../Input.js"
 import type { Node, NodeOf, ParserLike } from "../node.js"
 import { children, nodeOf } from "../node.js"
+import * as Resume from "../resume.js"
 import { charOf, fastLimit, utf16be, utf16le, validate } from "../text.js"
 import type { ClosureCompiler, Fallback, Step } from "./closure.js"
 import { createClosureCompiler } from "./closure.js"
@@ -30,6 +31,12 @@ import { kindOfEncoding, TableSize, textSet, tokenSet } from "./sets.js"
 
 /** Helpers available to generated code as `R`. */
 const runtime = {
+  take: Resume.take,
+  save: Resume.save,
+  Done: Resume.Done,
+  /** Records the result of a resumed repetition (see `Resume.done`). */
+  done: (state: State<any>, key: object, entry: number, value: unknown, pos: number): void =>
+    Resume.save(state, key, entry, new Resume.Done(value, pos)),
   some: Option.some,
   none: Option.none,
   charOf,
@@ -67,6 +74,9 @@ export const jitSupported = (): boolean => {
 }
 
 const BT = `$S.mode="Backtrack";`
+
+/** How many units past the cursor a single token can depend on (see the closure compiler). */
+const Margin = 4
 
 /** How generated code reads the code units of an encoding (see `Emitter.reader`). */
 interface Reader {
@@ -130,8 +140,8 @@ class Emitter {
   private readonly closure: ClosureCompiler
   private next = 0
 
-  constructor(readonly root: ParserLike, readonly kind: 0 | 1 | 2) {
-    this.closure = createClosureCompiler(kind)
+  constructor(readonly root: ParserLike, readonly kind: 0 | 1 | 2, readonly resumable = false) {
+    this.closure = createClosureCompiler(kind, resumable)
     this.countRefs(root)
   }
 
@@ -247,6 +257,31 @@ class Emitter {
     return visit(p)
   }
 
+  /**
+   * In a resumable build: token code (which fails by breaking out of `bad`)
+   * that read within `lookahead` units of the end of a partial input re-runs
+   * interpreted, since it may have to report `Incomplete` there. Token code
+   * leaves `p` where it stopped reading, even when it fails.
+   */
+  private partialSafe(
+    p: ParserLike,
+    code: string,
+    bad: string,
+    lookahead: number,
+    out: string | null,
+    fail: string,
+    fn: Fn
+  ): string {
+    const ahead = Math.max(lookahead, Margin)
+    const st = this.v(fn)
+    const ok = this.v(fn)
+    const t = this.v(fn)
+    const leaf = this.label()
+    return `${st}=p;${ok}=false;${leaf}:{${bad}:{${code}${ok}=true;}` +
+      `if(!$S.partial||p+${ahead}<=E){if(${ok})break ${leaf};${fail}}` +
+      `p=${st};$S.pos=p;${t}=${this.const(p.step)}($S);if(${t}===F){${fail}}p=$S.pos;${out === null ? "" : `${out}=${t};`}}`
+  }
+
   call(name: string, out: string | null, fail: string): string {
     if (out === null) return `if(${name}(p)===F){${fail}}p=P;`
     return `${out}=${name}(p);if(${out}===F){${fail}}p=P;`
@@ -275,7 +310,8 @@ class Emitter {
       case "Fail":
         return `$S.mode=${JSON.stringify(node.mode)};${fail}`
       case "Eof":
-        return `if(p<E){${BT}${fail}}${set("void 0")}`
+        return `if(p<E){${BT}${fail}}` + (this.resumable ? `if($S.partial){$S.mode="Incomplete";${fail}}` : "") +
+          set("void 0")
       case "Location":
         return set("p")
       case "RestLen":
@@ -287,11 +323,15 @@ class Emitter {
       case "OneOf":
       case "TakeWhile": {
         if (!this.native(node.encoding)) return this.delegate(p, used, out, fail, fn)
-        const code = this.token(node, out, fail, fn)
-        return code ?? this.delegate(p, used, out, fail, fn)
+        if (!this.resumable) return this.token(node, out, fail, fn) ?? this.delegate(p, used, out, fail, fn)
+        const bad = this.label()
+        const code = this.token(node, out, `break ${bad};`, fn)
+        if (code === undefined) return this.delegate(p, used, out, fail, fn)
+        return this.partialSafe(p, code, bad, node._tag === "Literal" ? node.literal.length * 4 : Margin, out, fail, fn)
       }
       case "Escaped": {
-        if (!this.native(node.encoding)) return this.delegate(p, used, out, fail, fn)
+        // Streaming builds use the closure compiler's escapes, which keep checkpoints
+        if (!this.native(node.encoding) || this.resumable) return this.delegate(p, used, out, fail, fn)
         return this.escaped(p, node, out, fail, fn, d)
       }
       case "Map": {
@@ -449,13 +489,17 @@ class Emitter {
     const st = this.v(fn)
     const u = prune ? this.v(fn) : ""
     const done = this.label()
-    let code = `${st}=p;${prune ? `${u}=p<E?${this.unit("p")}:-1;` : ""}${done}:{`
+    // Near the end of a partial input, no branch is skipped: it may be incomplete rather than fail
+    const read = this.resumable ? `$S.partial&&p+${Margin}>E?-2:p<E?${this.unit("p")}:-1` : `p<E?${this.unit("p")}:-1`
+    let code = `${st}=p;${prune ? `${u}=${read};` : ""}${done}:{`
     parsers.forEach((q, i) => {
       const bad = this.label()
       const branch = `${bad}:{${this.gen(q, used, out, `break ${bad};`, fn, d)}break ${done};}` +
         `if($S.mode!=="Backtrack"){${fail}}p=${st};`
       const f = firsts?.[i]
-      code += prune && f!.mode === Strict ? `if(${this.startTest(f!, u)}){${branch}}` : branch
+      code += prune && f!.mode === Strict
+        ? `if(${this.resumable ? `${u}===-2||` : ""}${this.startTest(f!, u)}){${branch}}`
+        : branch
     })
     return code + `${BT}${fail}}`
   }
@@ -511,7 +555,9 @@ class Emitter {
     const read = r === undefined
       ? `p<E?${this.unit("p")}:-1`
       : `${r.guard("p")}?${r.unit("p")}:p<E?${size}:-1`
-    let code = `${u}=${read};${sw}:switch(${u}){`
+    // Near the end of a partial input, the general path handles incomplete units
+    const near = this.resumable ? `$S.partial&&p+${Margin}>E?${size}:` : ""
+    let code = `${u}=${near}${read};${sw}:switch(${u}){`
     for (const [q, units] of groups) {
       code += units.map((x) => `case ${x}:`).join("") +
         `{${peek ? "" : `p+=${r?.width ?? 1};`}${this.gen(q, used, out, fail, fn, d)}break ${sw};}`
@@ -529,7 +575,7 @@ class Emitter {
     const isFold = node._tag === "Fold"
     const keep = out !== null && used
     const x = keep ? this.v(fn) : null
-    const acc = keep ? out! : null
+    const acc = keep ? out! : this.v(fn)
     let init = ""
     let add = ""
     if (keep) {
@@ -543,9 +589,37 @@ class Emitter {
     }
     const check = max === Infinity ? `if(p===${st}){$S.mode="Cut";${fail}}` : ""
     const bound = max === Infinity ? "" : `${n}<${max}`
-    return `${init}${loop}:for(${n}=0;${bound};${n}++){${st}=p;` +
+    const r = this.resumable ? this.resumePoint(fn) : undefined
+    const save = r === undefined
+      ? ""
+      : `if($S.mode==="Incomplete"&&$S.resume!==void 0)R.save($S,${r.key},${r.entry},{acc:${acc},count:${n},pos:${st}});`
+    const body = `${loop}:for(;${bound};${n}++){${st}=p;` +
       `${bad}:{${this.gen(node.self, keep, x, `break ${bad};`, fn, d)}${check}${add}continue ${loop};}` +
-      `if($S.mode!=="Backtrack"${min > 0 ? `||${n}<${min}` : ""}){${fail}}p=${st};break ${loop};}`
+      `${save}if($S.mode!=="Backtrack"${min > 0 ? `||${n}<${min}` : ""}){${fail}}p=${st};break ${loop};}`
+    if (r === undefined) return `${init}${n}=0;${body}`
+    return r.wrap(acc, `${acc}=cp.acc;${n}=cp.count;p=cp.pos;`, `${init}${n}=0;`, body)
+  }
+
+  /**
+   * In a resumable build, a repetition entered at `entry` may restart from a
+   * checkpoint (`restore`, with the checkpoint in `cp`), or return the result
+   * of a `Done` one; a resumed repetition records its result when it ends.
+   */
+  private resumePoint(fn: Fn) {
+    const key = this.const({})
+    const entry = this.v(fn)
+    const resumed = this.v(fn)
+    const done = this.label()
+    return {
+      key,
+      entry,
+      resumed,
+      wrap: (value: string, restore: string, fresh: string, body: string) =>
+        `${entry}=p;${resumed}=false;${done}:{if($S.resume!==void 0){const cp=R.take($S,${key},p);` +
+        `if(cp instanceof R.Done){p=cp.pos;${value}=cp.value;break ${done};}` +
+        `if(cp!==void 0){${restore}${resumed}=true;}}if(!${resumed}){${fresh}}${body}` +
+        `if(${resumed})R.done($S,${key},${entry},${value},p);}`
+    }
   }
 
   separated(node: NodeOf<"Separated">, used: boolean, out: string | null, fail: string, fn: Fn, d: number): string {
@@ -553,27 +627,34 @@ class Emitter {
     const keep = out !== null && used
     if (max === 0) return keep ? `${out}=[];` : ""
     const x = keep ? this.v(fn) : null
+    const acc = keep ? out! : this.v(fn)
     const n = this.v(fn)
     const st = this.v(fn)
     const done = this.label()
     const loop = this.label()
-    const push = keep ? `${out}.push(${x});` : ""
+    const push = keep ? `${acc}.push(${x});` : ""
+    const r = this.resumable ? this.resumePoint(fn) : undefined
+    const save = r === undefined
+      ? ""
+      : `if($S.mode==="Incomplete"&&$S.resume!==void 0)R.save($S,${r.key},${r.entry},{acc:${acc},count:${n},pos:${st}});`
     // Runs `body`; on its failure, stops the repetition (or fails if `fatal`)
-    const attempt = (body: (fail: string) => string, success: string, fatal: string) => {
+    const attempt = (body: (fail: string) => string, success: string, fatal: string, checkpoint: string) => {
       const ok = this.label()
       const bad = this.label()
       return `${ok}:{${bad}:{${body(`break ${bad};`)}${success}break ${ok};}` +
-        `if($S.mode!=="Backtrack"${fatal}){${fail}}p=${st};break ${done};}`
+        `${checkpoint}if($S.mode!=="Backtrack"${fatal}){${fail}}p=${st};break ${done};}`
     }
     const self = (f: string) => this.gen(node.self, keep, x, f, fn, d)
     const sep = (f: string) => this.gen(node.separator, false, null, f, fn, d)
     const check = max === Infinity ? `if(p===${st}){$S.mode="Cut";${fail}}` : ""
-    return `${keep ? `${out}=[];` : ""}${n}=0;${done}:{${st}=p;` +
-      attempt(self, `${push}${n}++;`, min > 0 ? "||true" : "") +
-      `${loop}:while(${max === Infinity ? "true" : `${n}<${max}`}){${st}=p;` +
-      attempt(sep, "", `||${n}<${min}`) + check +
-      attempt(self, `${push}${n}++;continue ${loop};`, `||${n}<${min}`) +
-      `}}`
+    const first = `${keep ? `${acc}=[];` : ""}${n}=0;${st}=p;` + attempt(self, `${push}${n}++;`, min > 0 ? "||true" : "", "")
+    const rest = `${loop}:while(${max === Infinity ? "true" : `${n}<${max}`}){${st}=p;` +
+      attempt(sep, "", `||${n}<${min}`, save) + check +
+      attempt(self, `${push}${n}++;continue ${loop};`, `||${n}<${min}`, save) +
+      `}`
+    if (r === undefined) return `${done}:{${first}${rest}}`
+    // `done` ends the repetition; the checkpoint wrapper records the result after it
+    return r.wrap(acc, `${acc}=cp.acc;${n}=cp.count;p=cp.pos;`, "", `${done}:{if(!${r.resumed}){${first}}${rest}}`)
   }
 
   // ---------------------------------------------------------------------------
@@ -796,12 +877,12 @@ const acceptTable = (set: CharSet, negate: boolean): Uint8Array => {
 }
 
 /** Generates the source of a compiled parser, without building it. */
-export const generate = (root: ParserLike, kind: 0 | 1 | 2): {
+export const generate = (root: ParserLike, kind: 0 | 1 | 2, resumable = false): {
   readonly source: string
   readonly constants: ReadonlyArray<unknown>
   readonly fallbacks: ReadonlyArray<Fallback>
 } => {
-  const e = new Emitter(root, kind)
+  const e = new Emitter(root, kind, resumable)
   const main = e.rule(root, true)
   const source = `"use strict";let $I,$E,$S,P;${e.functions.join("\n")}\n` +
     `return function run(state){const sI=$I,sE=$E,sS=$S,sP=P;$I=state.input;$E=state.end;$S=state;` +
@@ -810,17 +891,17 @@ export const generate = (root: ParserLike, kind: 0 | 1 | 2): {
 }
 
 /** Compiles a root parser for one input kind with `new Function`. */
-export const compileJit = (root: ParserLike, kind: 0 | 1 | 2): {
+export const compileJit = (root: ParserLike, kind: 0 | 1 | 2, resumable = false): {
   readonly step: Step
   readonly fallbacks: ReadonlyArray<Fallback>
   readonly source: string
 } => {
-  const { constants, fallbacks, source } = generate(root, kind)
+  const { constants, fallbacks, source } = generate(root, kind, resumable)
   const run = globalThis.Function("C", "F", "R", source)(constants, Fail, runtime) as Step
   // Generated code reads past `end` expecting nothing to match there, which
   // holds when `end` is the input's length, as it is in the runners.
   let closure: Step | undefined
   const step: Step = (state) =>
-    state.end === state.input.length ? run(state) : (closure ??= createClosureCompiler(kind).compile(root, true))(state)
+    state.end === state.input.length ? run(state) : (closure ??= createClosureCompiler(kind, resumable).compile(root, true))(state)
   return { step, fallbacks, source }
 }

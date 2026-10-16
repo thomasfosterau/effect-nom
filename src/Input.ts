@@ -230,6 +230,13 @@ export class State<I extends Input = Input> {
    * fail so that errors can show the input as text.
    */
   encoding: Encoding<any> | undefined = undefined
+  /**
+   * The checkpoints of a resumable streaming parse (see
+   * `ParserStream.parseAll`); `undefined` otherwise.
+   *
+   * @internal
+   */
+  resume: Map<object, Map<number, unknown>> | undefined = undefined
 
   constructor(source: I | Source<I>, options?: {
     readonly partial?: boolean | undefined
