@@ -417,14 +417,29 @@ and token-set predicates may be cached per character.
 3. **Token sets** compile to comparisons for a few ranges and to a 256-entry
    table plus a fallback test otherwise. Predicates without known ranges are
    called, with a per-character cache for ASCII (string predicates receive a
-   cached one-character string).
+   cached one-character string). The comparisons test the accepted runs or
+   the rejected ones, whichever takes fewer comparisons (runs at either end
+   of the table take one): the JSON string body is `c>31&&c!==34&&c!==92`,
+   not three two-sided ranges. `Text` sets whose ranges stay below the table
+   (or below the encoding's single-unit limit) don't call their test for the
+   code points above it.
 4. **Specialization** per input kind and encoding: strings use
    `charCodeAt`, bytes index the `Uint8Array`, `Text` parsers inline their
    encoding's single-unit fast path (below 0xD800 for strings, 0x80 for
    UTF-8, 0x100 for Latin-1) and call `decode` only for longer sequences.
    Array inputs keep the combinator structure but run token parsers through
    their steps.
-5. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
+5. **Numbers.** `Ascii.float` and `Text.float` are recognized (the parsers
+   they map with `toFloat` are registered in `internal/numbers.ts`). When
+   the text starts like a decimal number, one pass matches it and computes
+   its value from the input, without a slice: up to 15 significant digits
+   and a decimal exponent up to 22, with Clinger's fast path (exact digits
+   times or divided by an exact power of ten); up to 19 digits, in
+   double-double arithmetic, keeping the result only when both ends of its
+   error bound (2^-96, relative) round to it; anything else with `Number`
+   on the text. The value is always `Number`'s. `nan`, `inf` and failures
+   before a digit run the compiled parser.
+6. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
    elements of `preceded`/`terminated`/`delimited`/`separatedPair`, `as`,
    `asVoid` and `opt` in void position compile without building their
    values. `Seq` and `Struct` build their results directly.
@@ -478,17 +493,46 @@ cause and message.
 ### Results
 
 JSON benchmark (`pnpm build && pnpm bench`, 0.58 M-character document, best
-of 40 interleaved runs; this machine runs the interpreter at ~35 ms where the
-original measurements saw ~37 ms):
+of 40 interleaved runs; timings on this machine vary by 5–10% between
+runs):
 
 | Grammar and input | interpreted | closure | JIT |
 |---|---|---|---|
-| `json.ts` (Token/Ascii), string | 35.6 ms | 15.7 ms (2.3×) | 7.6 ms (4.7×) |
-| `json-text.ts`, `Text.string` | 37.2 ms | 19.5 ms (1.9×) | 8.1 ms (4.6×) |
-| `json-text.ts`, `Text.utf8` | 42.3 ms | 20.1 ms (2.1×) | 7.9 ms (5.3×) |
-| `json-text.ts`, `Text.utf16le` | 48.5 ms | 33.8 ms (1.4×) | 9.5 ms (5.1×) |
-| hand-fused (`bench/json-fused.ts`) | | | 4.1 ms |
-| `JSON.parse` | | | 1.7 ms |
+| `json.ts` (Token/Ascii), string | 39.7 ms | 14.9 ms (2.7×) | 7.7 ms (5.1×) |
+| `json-text.ts`, `Text.string` | 42.0 ms | 18.6 ms (2.3×) | 7.4 ms (5.7×) |
+| `json-text.ts`, `Text.utf8` | 46.8 ms | 19.2 ms (2.4×) | 7.7 ms (6.1×) |
+| `json-text.ts`, `Text.utf16le` | 54.9 ms | 40.2 ms (1.4×) | 9.7 ms (5.6×) |
+| hand-fused (`bench/json-fused.ts`) | | | 4.6 ms |
+| `JSON.parse` | | | 1.9 ms |
+
+Against `JSON.parse` on documents of different shapes (`pnpm bench:native`;
+bytes are compared with `TextDecoder` then `JSON.parse`), the compiled
+parsers take:
+
+| Document | `json.ts`, string | `Text.string` | `Text.utf8`, bytes |
+|---|---|---|---|
+| records, 1 KB | 4.0× | 3.7× | 2.9× |
+| records, 600 KB, pretty-printed | 4.1× | 4.0× | 2.2× |
+| records, 4 MB | 3.9× | 3.9× | 3.3× |
+| numbers, 1 MB | 1.2× | 1.2× | 1.0× |
+| ASCII strings, 1 MB | 2.9× | 3.1× | 3.1× |
+| escaped strings, 1 MB | 4.8× | 5.7× | 4.1× |
+| deep nesting, 100 KB | 2.1× | 2.2× | 1.8× |
+
+Numbers come within 1.2× of `JSON.parse` because floats are converted
+without slicing (above); for numbers with more than 15 significant digits,
+`Number` is about as costly as the whole of `JSON.parse`'s work, so the
+double-double path matters there. Strings are scanned one character at a
+time, about 1.5 ns per character, where V8's scanner and `indexOf` run
+several times faster: replacing the string loop of the generated code by
+an `indexOf` for the closing quote (an upper bound, not a correct parser)
+runs the ASCII strings document at 1.1×. A correct version also has to
+find backslashes, control characters and, for predicates, non-Latin-1
+characters; with cached searches it ran that document 1.8× faster, but
+documents of short strings 5–7% slower, so the compilers don't do it. On bytes, every
+string longer than 24 bytes costs a `TextDecoder` call, which has a fixed
+cost of about 100 ns. Records and nesting are dominated by the grammar's
+`Object.fromEntries` (below).
 
 The JIT's remaining gap to the hand-fused parser is mostly the grammar
 itself: `object` collects `[key, value]` tuples and calls
