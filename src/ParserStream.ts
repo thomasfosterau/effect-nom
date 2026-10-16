@@ -23,12 +23,16 @@
  *
  * @since 0.1.0
  */
+import type * as Context from "effect/Context"
+import * as Data from "effect/Data"
 import * as Effect from "effect/Effect"
 import { dual } from "effect/Function"
 import * as Stream from "effect/Stream"
-import type { Input, Source } from "./Input.js"
+import type { BinaryInput, Input, Source } from "./Input.js"
 import { Fail, Failure, fromSource, State } from "./Input.js"
 import * as ParseError from "./ParseError.js"
+import * as Compiler from "./internal/compiler/registry.js"
+import type * as Resume from "./internal/resume.js"
 import type { Parser } from "./Parser.js"
 
 /**
@@ -49,25 +53,6 @@ const concat = <I extends Chunkable>(a: I, b: I): I => {
     return out as I
   }
   return [...a, ...(b as ReadonlyArray<unknown>)] as unknown as I
-}
-
-const join = <I extends Chunkable>(chunks: ReadonlyArray<I>, empty: I | undefined): I => {
-  if (chunks.length === 0) return (empty ?? "") as I
-  const first = chunks[0]!
-  if (chunks.length === 1) return first
-  if (typeof first === "string") return chunks.join("") as I
-  if (first instanceof Uint8Array) {
-    let length = 0
-    for (const c of chunks) length += c.length
-    const out = new Uint8Array(length)
-    let offset = 0
-    for (const c of chunks as ReadonlyArray<Uint8Array>) {
-      out.set(c, offset)
-      offset += c.length
-    }
-    return out as I
-  }
-  return (chunks as ReadonlyArray<ReadonlyArray<unknown>>).flat() as unknown as I
 }
 
 const sliceFrom = <I extends Chunkable>(input: I, offset: number): I =>
@@ -162,7 +147,141 @@ export const parseMany: {
   }))
 
 /**
+ * Parses a stream of chunks incrementally, as one input. Chunks are parsed
+ * as they arrive, in partial mode; when the parser runs out of input, its
+ * repetitions keep checkpoints (see `internal/resume.ts`), so the next
+ * attempt carries on from where the last one stopped instead of starting
+ * over.
+ */
+class Incremental<A, E, I extends Chunkable> {
+  private kind: 0 | 1 | 2 | undefined
+  private text = ""
+  private bytes = new Uint8Array(0)
+  private items: Array<unknown> = []
+  private length = 0
+  private readonly resume: Resume.Checkpoints = new Map()
+  /** The input length at the last attempt, and where that attempt ran out of input. */
+  private attempted = 0
+  private restart = 0
+  /** Set once an attempt settles: a success (with its end offset) or a definite failure. */
+  private settled: { readonly value: A; readonly pos: number } | "failed" | undefined
+
+  constructor(
+    private readonly parser: Parser<A, E, any, I>,
+    private readonly context: Context.Context<never>,
+    empty: I | undefined
+  ) {
+    if (empty !== undefined) this.append(empty)
+  }
+
+  private append(chunk: I): void {
+    if (typeof chunk === "string") {
+      this.kind ??= 0
+      this.text += chunk
+      this.length += chunk.length
+    } else if (chunk instanceof Uint8Array) {
+      this.kind ??= 1
+      const needed = this.length + chunk.length
+      if (needed > this.bytes.length) {
+        // Grow geometrically, so appending costs amortized constant time per byte
+        const grown = new Uint8Array(Math.max(needed, this.bytes.length * 2, 4096))
+        grown.set(this.bytes.subarray(0, this.length))
+        this.bytes = grown
+      }
+      this.bytes.set(chunk, this.length)
+      this.length = needed
+    } else {
+      this.kind ??= 2
+      for (let i = 0; i < chunk.length; i++) this.items.push(chunk[i])
+      this.length = this.items.length
+    }
+  }
+
+  private input(): I {
+    switch (this.kind) {
+      case 1:
+        return this.bytes.subarray(0, this.length) as I
+      case 2:
+        // Items are only appended between attempts, after each state has read its `end`
+        return this.items as unknown as I
+      default:
+        return this.text as I
+    }
+  }
+
+  push(chunk: I): void {
+    if (chunk.length === 0) return
+    this.append(chunk)
+    if (this.settled !== undefined) return
+    // An attempt re-reads what the last one could not finish, from `restart`;
+    // waiting until at least half as much new input has arrived keeps the
+    // total work linear in the input. Strings are also copied when they are
+    // flattened, so they wait for a fraction of the whole input too.
+    const added = this.length - this.attempted
+    if (added < (this.attempted - this.restart) / 2) return
+    if (this.kind === 0 && added < this.attempted / 8) return
+    this.attempt()
+  }
+
+  /** The step attempts run: the parser's resumable compiled code if it was compiled, else the interpreter. */
+  private step(state: State<I>): unknown {
+    return (Compiler.stepFor(this.parser, state, true) ?? this.parser.step)(state)
+  }
+
+  private attempt(): void {
+    const state = new State(this.input(), { partial: true, context: this.context })
+    state.resume = this.resume
+    const a = this.step(state)
+    this.attempted = this.length
+    if (a !== Fail) {
+      this.settled = { value: a as A, pos: state.pos }
+    } else if (state.mode === "Incomplete") {
+      this.restart = state.failure.offset
+    } else {
+      this.settled = "failed"
+    }
+  }
+
+  finish(): Effect.Effect<A, ParseError.ParseError<E>> {
+    const settled = this.settled
+    if (settled !== undefined && settled !== "failed") {
+      if (settled.pos === this.length) return Effect.succeed(settled.value)
+    } else if (settled === undefined) {
+      // The last attempt, in complete mode, resumes from the checkpoints too
+      const state = new State(this.input(), { context: this.context })
+      state.resume = this.resume
+      const a = this.step(state)
+      if (a !== Fail && state.pos === state.end) return Effect.succeed(a as A)
+    }
+    // The error comes from an ordinary parse of the whole input, so it is the
+    // same as if the input had been parsed in one go
+    const all = this.input()
+    const state = new State(all, { context: this.context })
+    const a = this.parser.step(state)
+    if (a !== Fail && state.pos === state.end) return Effect.succeed(a)
+    if (a !== Fail) state.backtrack("Eof", ["end of input"])
+    return Effect.fail(ParseError.fromFailure<E>(all, state.reportedFailure(), state.mode, state.encoding))
+  }
+}
+
+/**
  * Parses an entire stream of chunks as a single complete input.
+ *
+ * Parsing does not wait for the stream to end: each chunk is parsed as it
+ * arrives, in partial mode, and when the parser runs out of input its
+ * repetitions (`repeat`, `separated`, `fold`, `escaped`, ...) remember how
+ * far they got, so that the next attempt resumes there rather than starting
+ * over. A large document, such as the body of a `fetch` response, is
+ * therefore parsed while it downloads, and is ready soon after its last
+ * byte. Use {@link parseReadable} or {@link parseResponse} for web streams.
+ *
+ * The result and any `ParseError` are those of parsing the whole input at
+ * once: errors are reported once the stream has ended, by an ordinary
+ * interpreted parse of the whole input. A parser compiled with
+ * `Parser.compile` streams compiled too (with a build that handles partial
+ * input), which is several times faster. As with compiled parsers,
+ * callbacks should be pure: the elements parsed before a checkpoint are
+ * not parsed again, and on failure everything is parsed again.
  *
  * @since 0.1.0
  * @category combinators
@@ -182,22 +301,90 @@ export const parseAll: {
   parser: Parser<A, E, R, I>,
   options?: ParseManyOptions<I>
 ): Effect.Effect<A, E0 | ParseError.ParseError<E>, R0 | R> =>
-  Effect.flatMap(
-    Stream.runCollect(self),
-    (chunks) =>
-      Effect.flatMap(Effect.context<R>(), (context) =>
-        Effect.suspend(() => {
-          const all = join(
-            Array.from(chunks, (c) => fromSource<I>(c)),
-            options?.empty === undefined ? undefined : fromSource<I>(options.empty)
-          )
-          const state = new State(all, { context })
-          const a = parser.step(state)
-          if (a === Fail) return Effect.fail(ParseError.fromFailure<E>(all, state.reportedFailure(), state.mode, state.encoding))
-          if (state.pos < state.end) {
-            state.backtrack("Eof", ["end of input"])
-            return Effect.fail(ParseError.fromFailure<E>(all, state.reportedFailure(), state.mode, state.encoding))
-          }
-          return Effect.succeed(a)
-        }))
+  Effect.flatMap(Effect.context<R>(), (context) =>
+    Effect.suspend(() => {
+      const empty = options?.empty === undefined ? undefined : fromSource<I>(options.empty)
+      const incremental = new Incremental(parser, context as Context.Context<never>, empty)
+      return Effect.flatMap(
+        Stream.runForEach(self, (chunk) => Effect.sync(() => incremental.push(fromSource<I>(chunk)))),
+        () => Effect.suspend(() => incremental.finish())
+      )
+    })))
+
+/**
+ * An error reading a `ReadableStream` given to {@link parseReadable} or
+ * {@link parseResponse}.
+ *
+ * @since 0.1.0
+ * @category errors
+ */
+export class ReadError extends Data.TaggedError("ReadError")<{ readonly cause: unknown }> {}
+
+/**
+ * Parses a web `ReadableStream` of bytes, such as the body of a `fetch`
+ * response, incrementally (see {@link parseAll}): the bytes are parsed as
+ * they arrive, without waiting for the end of the stream or decoding them
+ * first. Use a byte parser, e.g. one built from `Text.utf8`.
+ *
+ * @example
+ * ```ts
+ * import { Effect } from "effect"
+ * import { Parser, ParserStream, Text } from "effect-nom"
+ *
+ * const csvLine = Parser.separated(Text.utf8.takeTill(",\n"), Text.utf8.literal(","))
+ * const csv = Parser.separated(csvLine, Text.utf8.literal("\n"))
+ *
+ * const response = await fetch("https://example.com/data.csv")
+ * const rows = await Effect.runPromise(ParserStream.parseReadable(response.body!, csv))
+ * ```
+ *
+ * @since 0.1.0
+ * @category combinators
+ */
+export const parseReadable: {
+  <A, E, R>(
+    parser: Parser<A, E, R, Uint8Array>
+  ): (self: ReadableStream<BinaryInput>) => Effect.Effect<A, ParseError.ParseError<E> | ReadError, R>
+  <A, E, R>(
+    self: ReadableStream<BinaryInput>,
+    parser: Parser<A, E, R, Uint8Array>
+  ): Effect.Effect<A, ParseError.ParseError<E> | ReadError, R>
+} = dual(2, <A, E, R>(
+  self: ReadableStream<BinaryInput>,
+  parser: Parser<A, E, R, Uint8Array>
+): Effect.Effect<A, ParseError.ParseError<E> | ReadError, R> =>
+  parseAll(
+    Stream.fromReadableStream({ evaluate: () => self, onError: (cause) => new ReadError({ cause }) }),
+    parser,
+    { empty: new Uint8Array(0) }
   ))
+
+/**
+ * Parses the body of a `fetch` `Response` incrementally, as it downloads
+ * (see {@link parseReadable}). A response without a body is parsed as empty
+ * input. The status is not checked.
+ *
+ * @example
+ * ```ts
+ * import { Effect } from "effect"
+ * import { Parser, ParserStream, Text } from "effect-nom"
+ *
+ * const lines = Parser.separated(Text.utf8.tillLineEnding, Text.utf8.lineEnding)
+ *
+ * const response = await fetch("https://example.com/log.txt")
+ * const value = await Effect.runPromise(ParserStream.parseResponse(response, lines))
+ * ```
+ *
+ * @since 0.1.0
+ * @category combinators
+ */
+export const parseResponse: {
+  <A, E, R>(
+    parser: Parser<A, E, R, Uint8Array>
+  ): (self: Response) => Effect.Effect<A, ParseError.ParseError<E> | ReadError, R>
+  <A, E, R>(self: Response, parser: Parser<A, E, R, Uint8Array>): Effect.Effect<A, ParseError.ParseError<E> | ReadError, R>
+} = dual(2, <A, E, R>(
+  self: Response,
+  parser: Parser<A, E, R, Uint8Array>
+): Effect.Effect<A, ParseError.ParseError<E> | ReadError, R> =>
+  parseReadable(self.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() }), parser))

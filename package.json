@@ -35,6 +35,7 @@
     "test": "vitest run",
     "build": "tsc -p tsconfig.build.json",
     "bench": "node --experimental-strip-types bench/json.bench.ts",
+    "bench:stream": "node --experimental-strip-types bench/stream.bench.ts",
     "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {

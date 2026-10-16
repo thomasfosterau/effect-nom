@@ -40,39 +40,40 @@ export const register = (p: ParserLike, backend: Backend): void => {
 
 export const isRegistered = (p: ParserLike): boolean => registry.has(p)
 
-const build = (p: ParserLike, kind: 0 | 1 | 2, backend: Backend): Compiled => {
+const build = (p: ParserLike, kind: 0 | 1 | 2, backend: Backend, resumable: boolean): Compiled => {
   if (backend === "auto" && jitSupported()) {
     try {
-      const { fallbacks, source, step } = compileJit(p, kind)
+      const { fallbacks, source, step } = compileJit(p, kind, resumable)
       return { backend: "jit", step, fallbacks, error: undefined, source }
     } catch (error) {
       // Fall back to the closure compiler, remembering why
-      return { ...buildClosure(p, kind), jitError: error }
+      return { ...buildClosure(p, kind, resumable), jitError: error }
     }
   }
-  return buildClosure(p, kind)
+  return buildClosure(p, kind, resumable)
 }
 
-const buildClosure = (p: ParserLike, kind: 0 | 1 | 2): Compiled => {
+const buildClosure = (p: ParserLike, kind: 0 | 1 | 2, resumable: boolean): Compiled => {
   try {
-    const { fallbacks, step } = compileClosure(p, kind)
+    const { fallbacks, step } = compileClosure(p, kind, resumable)
     return { backend: "closure", step, fallbacks, error: undefined }
   } catch (error) {
     return { backend: undefined, step: undefined, fallbacks: [], error }
   }
 }
 
-/** The compiled form of a registered parser for an input kind, compiling it if needed. */
-export const compiled = (p: ParserLike, kind: 0 | 1 | 2): Compiled | undefined => {
+/**
+ * The compiled form of a registered parser for an input kind, compiling it
+ * if needed. `resumable` selects the build used by streaming parses, which
+ * supports partial input and checkpoints.
+ */
+export const compiled = (p: ParserLike, kind: 0 | 1 | 2, resumable = false): Compiled | undefined => {
   const entry = registry.get(p)
   if (entry === undefined) return undefined
-  return entry.byKind[kind] ??= build(p, kind, entry.backend)
+  const index = resumable ? kind + 3 : kind
+  return entry.byKind[index] ??= build(p, kind, entry.backend, resumable)
 }
 
 /** The compiled step for running `p` on `state`, if it is registered. */
-export const stepFor = (p: ParserLike, state: State<any>): Step | undefined => {
-  const entry = registry.get(p)
-  if (entry === undefined) return undefined
-  const kind = state.inputKind
-  return (entry.byKind[kind] ??= build(p, kind, entry.backend)).step
-}
+export const stepFor = (p: ParserLike, state: State<any>, resumable = false): Step | undefined =>
+  compiled(p, state.inputKind, resumable)?.step

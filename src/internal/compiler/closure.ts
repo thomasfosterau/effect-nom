@@ -16,6 +16,7 @@ import { nodeOf } from "../node.js"
 import { charOf, fastLimit, fold, validate } from "../text.js"
 import { countTokens, indexOf } from "../tokens.js"
 import type { AltPlan } from "./first.js"
+import * as Resume from "../resume.js"
 import { FirstSets, planAlt } from "./first.js"
 import type { CharSet } from "./sets.js"
 import { kindOfEncoding, TableSize, textSet, tokenSet } from "./sets.js"
@@ -34,6 +35,15 @@ export const maxNodes = 2048
 
 const BT: ErrMode = "Backtrack"
 const CUT: ErrMode = "Cut"
+const INC: ErrMode = "Incomplete"
+
+/**
+ * How many units past the cursor a single token can depend on (a code
+ * point is at most 4 units). In a partial parse, a token parser that read
+ * no closer than this to the end of the input behaves exactly as on
+ * complete input.
+ */
+const Margin = 4
 
 const lowerAscii = (c: number): number => c >= 65 && c <= 90 ? c + 32 : c
 
@@ -52,8 +62,33 @@ class Compiler {
   private readonly fellBack = new Set<ParserLike>()
   private budget = maxNodes
 
-  constructor(readonly kind: 0 | 1 | 2) {
+  /**
+   * `resumable`: compile for streaming parses, which may be partial (see
+   * `state.partial`) and keep checkpoints (see `internal/resume.ts`).
+   */
+  constructor(readonly kind: 0 | 1 | 2, readonly resumable = false) {
     this.firsts = new FirstSets(kind)
+  }
+
+  /**
+   * In a resumable build, runs the compiled token parser `step`, and falls
+   * back to the interpreted one when it read within `lookahead` units of
+   * the end of a partial input, where it might have to report `Incomplete`.
+   * Compiled token parsers leave `state.pos` where they stopped reading,
+   * even when they fail.
+   */
+  private partialSafe(p: ParserLike, step: Step, lookahead: number): Step {
+    if (!this.resumable) return step
+    const interpreted = p.step
+    const ahead = Math.max(lookahead, Margin)
+    return (s) => {
+      if (!s.partial) return step(s)
+      const start = s.pos
+      const r = step(s)
+      if (s.pos + ahead <= s.end) return r
+      s.pos = start
+      return interpreted(s)
+    }
   }
 
   /** Compiles `p`; when `used` is false its output is not needed. */
@@ -115,6 +150,10 @@ class Compiler {
             s.mode = BT
             return Fail
           }
+          if (s.partial) {
+            s.mode = INC
+            return Fail
+          }
           return undefined
         }
       case "Location":
@@ -131,7 +170,11 @@ class Compiler {
       case "TakeUntil":
       case "Rest":
         if (!this.native(node.encoding)) return this.fallback(p, node, "token parser on array input")
-        return node.encoding === undefined ? this.token(p, node, used) : this.text(p, node, node.encoding, used)
+        return this.partialSafe(
+          p,
+          node.encoding === undefined ? this.token(p, node, used) : this.text(p, node, node.encoding, used),
+          node._tag === "Literal" || node._tag === "TakeUntil" ? node.literal.length * 4 : Margin
+        )
       case "TillLineEnding":
       case "Identifier":
       case "Bom":
@@ -452,9 +495,11 @@ class Compiler {
     const lists = plan.lists.map((l) => l.map((i) => steps[i]!))
     const { byUnit, end, high } = plan
     const unit = this.unitReader()
+    const resumable = this.resumable
     return (s) => {
-      const u = unit(s)
-      const candidates = lists[u < 0 ? end : u < TableSize ? byUnit[u]! : high]!
+      // Near the end of a partial input, branches may be incomplete rather than fail
+      const u = resumable && s.partial && s.pos + Margin > s.end ? -2 : unit(s)
+      const candidates = u === -2 ? steps : lists[u < 0 ? end : u < TableSize ? byUnit[u]! : high]!
       const start = s.pos
       for (let i = 0; i < candidates.length; i++) {
         const a = candidates[i]!(s)
@@ -514,7 +559,9 @@ class Compiler {
     }
     const unit = this.unitReader()
     const advance = peek ? 0 : 1
+    const resumable = this.resumable
     return (s) => {
+      if (resumable && s.partial && s.pos + Margin > s.end) return general(s)
       const u = unit(s)
       if (u < 0) {
         s.mode = BT
@@ -536,61 +583,53 @@ class Compiler {
     const checkLoop = max === Infinity
     const isFold = node._tag === "Fold"
     const c = this.compile(node.self, used)
-    if (!used) {
-      return (s) => {
-        for (let count = 0; count < max; count++) {
-          const start = s.pos
-          if (c(s) === Fail) {
-            if (s.mode !== BT || count < min) return Fail
-            s.pos = start
-            return undefined
-          }
-          if (checkLoop && s.pos === start) {
-            s.mode = CUT
-            return Fail
-          }
-        }
-        return undefined
-      }
-    }
-    if (isFold) {
-      const { f, init } = node as NodeOf<"Fold">
-      return (s) => {
-        let acc = init()
-        for (let count = 0; count < max; count++) {
-          const start = s.pos
-          const a = c(s)
-          if (a === Fail) {
-            if (s.mode !== BT || count < min) return Fail
-            s.pos = start
-            return acc
-          }
-          if (checkLoop && s.pos === start) {
-            s.mode = CUT
-            return Fail
-          }
-          acc = f(acc, a)
-        }
+    const resumable = this.resumable
+    const key = {}
+    // The accumulator: an array, the fold's value, or nothing when unused
+    const init: () => unknown = !used ? () => undefined : isFold ? (node as NodeOf<"Fold">).init : () => []
+    const add: (acc: any, a: unknown) => unknown = !used
+      ? (acc) => acc
+      : isFold
+      ? (node as NodeOf<"Fold">).f
+      : (acc, a) => {
+        acc.push(a)
         return acc
       }
-    }
     return (s) => {
-      const acc: Array<unknown> = []
-      for (let count = 0; count < max; count++) {
+      const entry = s.pos
+      let acc: unknown
+      let count = 0
+      let resumed = false
+      if (resumable && s.resume !== undefined) {
+        const cp = Resume.take(s, key, entry) as Resume.Done | { acc: unknown; count: number; pos: number } | undefined
+        if (cp instanceof Resume.Done) {
+          s.pos = cp.pos
+          return cp.value
+        }
+        if (cp !== undefined) {
+          acc = cp.acc
+          count = cp.count
+          s.pos = cp.pos
+          resumed = true
+        }
+      }
+      if (!resumed) acc = init()
+      for (; count < max; count++) {
         const start = s.pos
         const a = c(s)
         if (a === Fail) {
+          if (s.mode === INC && s.resume !== undefined) Resume.save(s, key, entry, { acc, count, pos: start })
           if (s.mode !== BT || count < min) return Fail
           s.pos = start
-          return acc
+          return resumed ? Resume.done(s, key, entry, true, acc) : acc
         }
         if (checkLoop && s.pos === start) {
           s.mode = CUT
           return Fail
         }
-        acc.push(a)
+        acc = add(acc, a)
       }
-      return acc
+      return resumed ? Resume.done(s, key, entry, true, acc) : acc
     }
   }
 
@@ -625,25 +664,46 @@ class Compiler {
     const checkLoop = max === Infinity
     const c = this.compile(node.self, used)
     const sep = this.compile(node.separator, false)
+    const resumable = this.resumable
+    const key = {}
     return (s) => {
-      const acc: Array<unknown> | undefined = used ? [] : undefined
+      const entry = s.pos
+      let acc: Array<unknown> | undefined
       let count = 0
-      if (max === 0) return acc
-      let start = s.pos
-      const first = c(s)
-      if (first === Fail) {
-        if (s.mode !== BT || min > 0) return Fail
-        s.pos = start
-        return acc
+      let resumed = false
+      if (resumable && s.resume !== undefined) {
+        const cp = Resume.take(s, key, entry) as Resume.Done | { acc: Array<unknown>; count: number; pos: number } | undefined
+        if (cp instanceof Resume.Done) {
+          s.pos = cp.pos
+          return cp.value
+        }
+        if (cp !== undefined) {
+          acc = cp.acc
+          count = cp.count
+          s.pos = cp.pos
+          resumed = true
+        }
       }
-      acc?.push(first)
-      count++
-      while (count < max) {
-        start = s.pos
-        if (sep(s) === Fail) {
-          if (s.mode !== BT || count < min) return Fail
+      if (!resumed) {
+        acc = used ? [] : undefined
+        if (max === 0) return acc
+        const start = s.pos
+        const first = c(s)
+        if (first === Fail) {
+          if (s.mode !== BT || min > 0) return Fail
           s.pos = start
           return acc
+        }
+        acc?.push(first)
+        count = 1
+      }
+      while (count < max) {
+        const start = s.pos
+        if (sep(s) === Fail) {
+          if (s.mode === INC && s.resume !== undefined) Resume.save(s, key, entry, { acc, count, pos: start })
+          if (s.mode !== BT || count < min) return Fail
+          s.pos = start
+          return resumed ? Resume.done(s, key, entry, true, acc) : acc
         }
         if (checkLoop && s.pos === start) {
           s.mode = CUT
@@ -651,14 +711,15 @@ class Compiler {
         }
         const a = c(s)
         if (a === Fail) {
+          if (s.mode === INC && s.resume !== undefined) Resume.save(s, key, entry, { acc, count, pos: start })
           if (s.mode !== BT || count < min) return Fail
           s.pos = start
-          return acc
+          return resumed ? Resume.done(s, key, entry, true, acc) : acc
         }
         acc?.push(a)
         count++
       }
-      return acc
+      return resumed ? Resume.done(s, key, entry, true, acc) : acc
     }
   }
 
@@ -666,17 +727,37 @@ class Compiler {
     const c = this.compile(node.self, true)
     const sep = this.compile(node.separator, true)
     const op = node.op
+    const resumable = this.resumable
+    const key = {}
     if (!node.right) {
       return (s) => {
-        let acc = c(s)
-        if (acc === Fail) return Fail
+        const entry = s.pos
+        let acc: unknown
+        let resumed = false
+        if (resumable && s.resume !== undefined) {
+          const cp = Resume.take(s, key, entry) as Resume.Done | { acc: unknown; pos: number } | undefined
+          if (cp instanceof Resume.Done) {
+            s.pos = cp.pos
+            return cp.value
+          }
+          if (cp !== undefined) {
+            acc = cp.acc
+            s.pos = cp.pos
+            resumed = true
+          }
+        }
+        if (!resumed) {
+          acc = c(s)
+          if (acc === Fail) return Fail
+        }
         while (true) {
           const start = s.pos
           const x = sep(s)
           if (x === Fail) {
+            if (s.mode === INC && s.resume !== undefined) Resume.save(s, key, entry, { acc, pos: start })
             if (s.mode !== BT) return Fail
             s.pos = start
-            return acc
+            return resumed ? Resume.done(s, key, entry, true, acc) : acc
           }
           if (s.pos === start) {
             s.mode = CUT
@@ -684,9 +765,10 @@ class Compiler {
           }
           const a = c(s)
           if (a === Fail) {
+            if (s.mode === INC && s.resume !== undefined) Resume.save(s, key, entry, { acc, pos: start })
             if (s.mode !== BT) return Fail
             s.pos = start
-            return acc
+            return resumed ? Resume.done(s, key, entry, true, acc) : acc
           }
           acc = op(acc, x, a)
         }
@@ -795,7 +877,7 @@ class Compiler {
         if (kind === 1) {
           return (s) => {
             const start = s.pos
-            if (s.end - start < count) return fail(s)
+            if (s.end - start < count) return failAt(s, s.end)
             s.pos = start + count
             return used ? (s.input as Uint8Array).subarray(start, start + count) : undefined
           }
@@ -811,7 +893,7 @@ class Compiler {
             i += c >= 0xd800 && c <= 0xdbff && i + 1 < str.length && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1
             got++
           }
-          if (got < count) return fail(s)
+          if (got < count) return failAt(s, i)
           s.pos = i
           return used ? str.slice(start, i) : undefined
         }
@@ -824,10 +906,10 @@ class Compiler {
         return (s) => {
           const start = s.pos
           const idx = indexOf(s, literal, start)
-          if (idx < 0) return fail(s)
+          if (idx < 0) return failAt(s, s.end)
           if (bounded) {
             const count = countTokens(s, start, idx)
-            if (count < min || count > max) return fail(s)
+            if (count < min || count > max) return failAt(s, idx)
           }
           s.pos = idx
           return used ? s.slice(start, idx) : undefined
@@ -895,7 +977,7 @@ class Compiler {
         const limit = max === Infinity ? s.end : Math.min(s.end, start + max)
         let i = start
         while (i < limit && accept[bytes[i]!] === 1) i++
-        if (i - start < min) return fail(s)
+        if (i - start < min) return failAt(s, i)
         s.pos = i
         return used ? bytes.subarray(start, i) : undefined
       }
@@ -926,7 +1008,7 @@ class Compiler {
         }
         count++
       }
-      if (count < min) return fail(s)
+      if (count < min) return failAt(s, i)
       s.pos = i
       return used ? str.slice(start, i) : undefined
     }
@@ -972,7 +1054,7 @@ class Compiler {
             const input = s.input
             let pos = start
             for (let i = 0; i < n; i++) {
-              if (pos >= end) return fail(s)
+              if (pos >= end) return failAt(s, pos)
               const c = unitAt(input, pos)
               let cp: number
               if (c < fast) {
@@ -980,10 +1062,10 @@ class Compiler {
                 pos++
               } else {
                 cp = decode(input, pos, end)
-                if (cp < 0) return fail(s)
+                if (cp < 0) return failAt(s, pos)
                 pos += width(cp)
               }
-              if (fold(cp) !== folded[i]) return fail(s)
+              if (fold(cp) !== folded[i]) return failAt(s, pos)
             }
             s.pos = pos
             return used ? toText(input, start, pos) : undefined
@@ -1042,12 +1124,12 @@ class Compiler {
           const input = s.input
           let pos = start
           for (let got = 0; got < count; got++) {
-            if (pos >= end) return fail(s)
+            if (pos >= end) return failAt(s, pos)
             const c = unitAt(input, pos)
             if (c < fast) pos++
             else {
               const cp = decode(input, pos, end)
-              if (cp < 0) return fail(s)
+              if (cp < 0) return failAt(s, pos)
               pos += width(cp)
             }
           }
@@ -1082,7 +1164,7 @@ class Compiler {
             }
             count++
           }
-          if (count < min) return fail(s)
+          if (count < min) return failAt(s, i)
           s.pos = i
           return used ? toText(input, start, i) : undefined
         }
@@ -1161,12 +1243,32 @@ class Compiler {
         return true
       }
     }
+    const resumable = this.resumable
+    const key = {}
+    /** Fails as incomplete, keeping a checkpoint in a streaming parse. */
+    const incomplete = (s: State<any>, start: number, checkpoint: unknown): typeof Fail => {
+      if (s.resume !== undefined) Resume.save(s, key, start, checkpoint)
+      s.mode = INC
+      return Fail
+    }
     if (raw) {
       const slice: (s: State<any>, start: number) => unknown = enc === undefined
         ? (s, start) => s.slice(start, s.pos)
         : (s, start) => enc.text(s.input, start, s.pos)
       return (s) => {
         const start = s.pos
+        let resumed = false
+        if (resumable && s.resume !== undefined) {
+          const cp = Resume.take(s, key, start) as Resume.Done | number | undefined
+          if (cp instanceof Resume.Done) {
+            s.pos = cp.pos
+            return cp.value
+          }
+          if (cp !== undefined) {
+            s.pos = cp
+            resumed = true
+          }
+        }
         while (s.pos < s.end) {
           const before = s.pos
           if (normal(s) !== Fail) {
@@ -1176,19 +1278,35 @@ class Compiler {
             }
             continue
           }
+          if (s.mode === INC) return incomplete(s, start, before)
           if (s.mode !== BT) return Fail
           s.pos = before
           if (control(s)) {
-            if (escape(s) === Fail) return Fail
+            if (escape(s) === Fail) return s.mode === INC ? incomplete(s, start, before) : Fail
           } else {
-            return slice(s, start)
+            return resumed ? Resume.done(s, key, start, true, slice(s, start)) : slice(s, start)
           }
         }
-        return slice(s, start)
+        if (s.partial) return incomplete(s, start, s.pos)
+        return resumed ? Resume.done(s, key, start, true, slice(s, start)) : slice(s, start)
       }
     }
     return (s) => {
+      const start = s.pos
       let out = ""
+      let resumed = false
+      if (resumable && s.resume !== undefined) {
+        const cp = Resume.take(s, key, start) as Resume.Done | { out: string; pos: number } | undefined
+        if (cp instanceof Resume.Done) {
+          s.pos = cp.pos
+          return cp.value
+        }
+        if (cp !== undefined) {
+          out = cp.out
+          s.pos = cp.pos
+          resumed = true
+        }
+      }
       while (s.pos < s.end) {
         const before = s.pos
         const a = normal(s)
@@ -1198,18 +1316,20 @@ class Compiler {
             continue
           }
         } else {
+          if (s.mode === INC) return incomplete(s, start, { out, pos: before })
           if (s.mode !== BT) return Fail
           s.pos = before
         }
         if (control(s)) {
           const b = escape(s)
-          if (b === Fail) return Fail
+          if (b === Fail) return s.mode === INC ? incomplete(s, start, { out, pos: before }) : Fail
           out += b
         } else {
-          return out
+          return resumed ? Resume.done(s, key, start, true, out) : out
         }
       }
-      return out
+      if (s.partial) return incomplete(s, start, { out, pos: s.pos })
+      return resumed ? Resume.done(s, key, start, true, out) : out
     }
   }
 }
@@ -1217,6 +1337,13 @@ class Compiler {
 type TokenNode = NodeOf<"Any" | "Literal" | "OneOf" | "Take" | "TakeWhile" | "TakeUntil" | "Rest">
 
 const fail = (s: State<any>): typeof Fail => {
+  s.mode = BT
+  return Fail
+}
+
+/** Fails, leaving the cursor at `pos`: how far a token parser read (see `partialSafe`). */
+const failAt = (s: State<any>, pos: number): typeof Fail => {
+  s.pos = pos
   s.mode = BT
   return Fail
 }
@@ -1261,8 +1388,8 @@ export interface ClosureCompiler {
   readonly fallbacks: ReadonlyArray<Fallback>
 }
 
-export const createClosureCompiler = (kind: 0 | 1 | 2): ClosureCompiler => {
-  const compiler = new Compiler(kind)
+export const createClosureCompiler = (kind: 0 | 1 | 2, resumable = false): ClosureCompiler => {
+  const compiler = new Compiler(kind, resumable)
   return {
     compile: (p, used) => compiler.compile(p, used),
     note: (p, node, reason) => compiler.note(p, node, reason),
@@ -1274,9 +1401,10 @@ export const createClosureCompiler = (kind: 0 | 1 | 2): ClosureCompiler => {
 /** Compiles a root parser for one input kind. */
 export const compileClosure = (
   root: ParserLike,
-  kind: 0 | 1 | 2
+  kind: 0 | 1 | 2,
+  resumable = false
 ): { readonly step: Step; readonly fallbacks: ReadonlyArray<Fallback> } => {
-  const compiler = new Compiler(kind)
+  const compiler = new Compiler(kind, resumable)
   const step = compiler.compile(root, true)
   return { step, fallbacks: compiler.fallbacks }
 }

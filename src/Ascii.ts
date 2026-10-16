@@ -28,6 +28,7 @@ import { Fail } from "./Input.js"
 import type { ErrorKind } from "./ParseError.js"
 import type { Parser } from "./Parser.js"
 import * as P from "./Parser.js"
+import * as Resume from "./internal/resume.js"
 import { latin1 } from "./internal/text.js"
 import { codePointPredicate } from "./internal/tokens.js"
 import { literalImpl, range, takeWhileImpl } from "./Token.js"
@@ -500,6 +501,17 @@ export const takeEscaped = <A, E, R, I extends Input, B, E2, R2, I2 extends Inpu
   }, escapable, (state, start) => state.slice(start, state.pos) as Slice<I & I2>, ctrl, undefined)
 }
 
+const isIncomplete = (state: State<any>): boolean => state.mode === "Incomplete"
+
+/**
+ * Fails with the current (`Incomplete`) failure, recording a checkpoint
+ * first in a streaming parse.
+ */
+const suspendAt = (state: State<any>, key: object, start: number, checkpoint: unknown): Fail => {
+  if (state.resume !== undefined) Resume.save(state, key, start, checkpoint)
+  return Fail
+}
+
 /** @internal */
 export const takeEscapedImpl = <A, E, R, I extends Input, B, E2, R2, I2 extends Input, S>(
   normal: Parser<A, E, R, I>,
@@ -511,8 +523,21 @@ export const takeEscapedImpl = <A, E, R, I extends Input, B, E2, R2, I2 extends 
 ): Parser<S, E | E2, R | R2, I & I2> => {
   const normalStep = normal.step
   const escStep = escapable.step
+  const key = {}
   return P.described((state: State<any>) => {
     const start = state.pos
+    let resumed = false
+    if (state.resume !== undefined) {
+      const checkpoint = Resume.take(state, key, start) as number | Resume.Done | undefined
+      if (checkpoint instanceof Resume.Done) {
+        state.pos = checkpoint.pos
+        return checkpoint.value as S
+      }
+      if (checkpoint !== undefined) {
+        state.pos = checkpoint
+        resumed = true
+      }
+    }
     while (state.pos < state.end) {
       const before = state.pos
       const a = normalStep(state)
@@ -520,16 +545,20 @@ export const takeEscapedImpl = <A, E, R, I extends Input, B, E2, R2, I2 extends 
         if (state.pos === before) return state.failMessage("Cut", "Assert", "`takeEscaped` parsers must always consume")
         continue
       }
+      if (state.mode === "Incomplete") return suspendAt(state, key, start, before)
       if (state.mode !== "Backtrack") return Fail
       state.pos = before
       if (matchControl(state)) {
-        if (escStep(state) === Fail) return Fail
+        if (escStep(state) === Fail) return isIncomplete(state) ? suspendAt(state, key, start, before) : Fail
       } else {
-        return slice(state, start)
+        return Resume.done(state, key, start, resumed, slice(state, start))
       }
     }
-    if (state.partial) return state.incomplete(0)
-    return slice(state, start)
+    if (state.partial) {
+      state.incomplete(0)
+      return suspendAt(state, key, start, state.pos)
+    }
+    return Resume.done(state, key, start, resumed, slice(state, start))
   }, "takeEscaped", { _tag: "Escaped", normal, control, escape: escapable, raw: true, encoding })
 }
 
@@ -574,6 +603,12 @@ export const escaped = <E, R, I extends Input, E2, R2, I2 extends Input>(
   }, escape, ctrl, undefined)
 }
 
+/** How far `escaped` got: the text so far, and where to carry on. */
+interface EscapedCheckpoint {
+  readonly out: string
+  readonly pos: number
+}
+
 /** @internal */
 export const escapedImpl = <E, R, I extends Input, E2, R2, I2 extends Input>(
   normal: Parser<string, E, R, I>,
@@ -584,8 +619,23 @@ export const escapedImpl = <E, R, I extends Input, E2, R2, I2 extends Input>(
 ): Parser<string, E | E2, R | R2, I & I2> => {
   const normalStep = normal.step
   const escStep = escape.step
+  const key = {}
   return P.described((state: State<any>) => {
+    const start = state.pos
     let out = ""
+    let resumed = false
+    if (state.resume !== undefined) {
+      const checkpoint = Resume.take(state, key, start) as EscapedCheckpoint | Resume.Done | undefined
+      if (checkpoint instanceof Resume.Done) {
+        state.pos = checkpoint.pos
+        return checkpoint.value as string
+      }
+      if (checkpoint !== undefined) {
+        out = checkpoint.out
+        state.pos = checkpoint.pos
+        resumed = true
+      }
+    }
     while (state.pos < state.end) {
       const before = state.pos
       const a = normalStep(state)
@@ -596,19 +646,23 @@ export const escapedImpl = <E, R, I extends Input, E2, R2, I2 extends Input>(
         }
         // `normal` matched nothing: fall through to the control character
       } else {
+        if (state.mode === "Incomplete") return suspendAt(state, key, start, { out, pos: before })
         if (state.mode !== "Backtrack") return Fail
         state.pos = before
       }
       if (matchControl(state)) {
         const b = escStep(state)
-        if (b === Fail) return Fail
+        if (b === Fail) return isIncomplete(state) ? suspendAt(state, key, start, { out, pos: before }) : Fail
         out += b
       } else {
-        return out
+        return Resume.done(state, key, start, resumed, out)
       }
     }
-    if (state.partial) return state.incomplete(0)
-    return out
+    if (state.partial) {
+      state.incomplete(0)
+      return suspendAt(state, key, start, { out, pos: state.pos })
+    }
+    return Resume.done(state, key, start, resumed, out)
   }, "escaped", { _tag: "Escaped", normal, control, escape, raw: false, encoding })
 }
 
