@@ -409,6 +409,11 @@ const floatText = P.taken(P.alt(
 
 /** @internal */
 export const toFloat = (s: Input): number => {
+  if (typeof s === "string") {
+    // Plain decimal notation (as opposed to `inf` or `nan`) ends in a digit or "."
+    const last = s.charCodeAt(s.length - 1)
+    if ((last >= 48 && last <= 57) || last === 46) return Number(s)
+  }
   const t = toText(s).toLowerCase()
   const negative = t.startsWith("-")
   const body = t.startsWith("-") || t.startsWith("+") ? t.slice(1) : t

@@ -359,10 +359,10 @@ Compilation is opt-in, not automatic, because:
   `Parser.compile(...)` around the root is all it takes. Sub-parsers need
   nothing.
 
-`options.backend` is `"auto"` (default: the JIT when `new Function` works,
-otherwise the closure compiler), `"jit"` (same, but never silently falls
-back to closures except when unsupported), or `"closure"` (never generates
-code, for CSP environments).
+`options.backend` is `"auto"` (the default: the JIT when `new Function`
+works, otherwise the closure compiler) or `"closure"` (never generates code,
+not even the probe, for CSP environments). A separate `"jit"` choice would
+add nothing: it too has to fall back when `new Function` is blocked.
 
 ### When the compiled code runs
 
@@ -448,6 +448,11 @@ fails to build, the parser uses the closure compiler. The entry point saves
 and restores its registers, so a callback that runs another compiled parse
 is safe.
 
+Byte encodings whose code units are wider than a byte (UTF-16LE/BE) get a
+*unit reader*: generated code reads `I[p] | I[p+1] << 8` inline and only
+calls `decode` for surrogates. Small parsers used in several places
+(`comma`, `sign`) are inlined rather than called.
+
 **(c) AOT** (later, optional): the JIT's emitter can write the same source
 into a static module that registers the compiled function for a parser,
 as `SchemaAOTCompiler` does.
@@ -469,3 +474,29 @@ backend and interpreted, on generated inputs (valid documents, random
 mutations, truncations, invalid bytes) and requires the same `Result`:
 equal values, or `ParseError`s with equal offset, mode, expected, context,
 cause and message.
+
+### Results
+
+JSON benchmark (`pnpm build && pnpm bench`, 0.58 M-character document, best
+of 40 interleaved runs; this machine runs the interpreter at ~35 ms where the
+original measurements saw ~37 ms):
+
+| Grammar and input | interpreted | closure | JIT |
+|---|---|---|---|
+| `json.ts` (Token/Ascii), string | 35.6 ms | 15.7 ms (2.3×) | 7.6 ms (4.7×) |
+| `json-text.ts`, `Text.string` | 37.2 ms | 19.5 ms (1.9×) | 8.1 ms (4.6×) |
+| `json-text.ts`, `Text.utf8` | 42.3 ms | 20.1 ms (2.1×) | 7.9 ms (5.3×) |
+| `json-text.ts`, `Text.utf16le` | 48.5 ms | 33.8 ms (1.4×) | 9.5 ms (5.1×) |
+| hand-fused (`bench/json-fused.ts`) | | | 4.1 ms |
+| `JSON.parse` | | | 1.7 ms |
+
+The JIT's remaining gap to the hand-fused parser is mostly the grammar
+itself: `object` collects `[key, value]` tuples and calls
+`Object.fromEntries`, while the hand-fused code assigns properties
+directly. The same grammar building its objects with a `fold` compiles to
+5.2 ms, within 1.3× of hand-fused code.
+
+What runs interpreted in the JSON grammars: only the parser returned by the
+`flatMap` in `\uXXXX` escapes (its first parser, `hex4`, is compiled). The
+closure compiler leaves UTF-16 at 1.4× because it decodes every code
+point through `Encoding.decode`; the JIT's unit reader removes that.
