@@ -451,7 +451,8 @@ and token-set predicates may be cached per character.
    `Object.defineProperty`, and from the first object key on (whose
    conversion may run code) entries are deferred to the end, in order, as
    `Object.fromEntries` converts them after the whole list is parsed
-   (`internal/entries.ts`).
+   (`internal/entries.ts`). Streaming (resumable) builds keep the array,
+   which their checkpoints hold.
 7. **Unused outputs** are skipped: `Taken`, `Peek`, `Not`, the dropped
    elements of `preceded`/`terminated`/`delimited`/`separatedPair`, `as`,
    `asVoid` and `opt` in void position compile without building their
@@ -562,3 +563,56 @@ What runs interpreted in the JSON grammars: only the parser returned by the
 `json-fast.ts` writes those escapes with `alt` and `cut` instead. The
 closure compiler leaves UTF-16 at 1.4× because it decodes every code
 point through `Encoding.decode`; the JIT's unit reader removes that.
+
+## 7. Streaming a document as it arrives
+
+`ParserStream.parseAll` (and `parseReadable` / `parseResponse` for web
+streams) parse one document from a stream of chunks without waiting for the
+end of the stream.
+
+**Why it is possible.** In partial mode a parser only succeeds on what it has
+seen: any parser that would look past the end of the input reports
+`Incomplete` instead. So a value parsed from a prefix of the input is the
+value that a parse of the whole input would produce, and so is the state of
+a repetition after its first `n` elements.
+
+**Checkpoints.** When a streaming attempt runs out of input, the failure
+unwinds the stack, but each repetition on the way (`repeat`, `fold`,
+`separated`, `separatedFoldl1`, `escaped`, `takeEscaped`) first records a
+checkpoint: its accumulator and where its next element starts, keyed by the
+repetition and the offset it was entered at (`internal/resume.ts`). The next
+attempt, with more input, parses from the root again, but each repetition it
+re-enters at the same offset resumes from its checkpoint. Re-parsing costs
+the path from the root to where the input ran out, not the whole prefix. A
+resumed repetition that completes leaves a `Done` checkpoint with its
+result, since the input may still run out after it, in trailing whitespace
+for example.
+
+Taking a progress checkpoint removes it, so its accumulator has a single
+owner. A repetition entered at the same offset twice in one attempt (after
+backtracking) simply parses again.
+
+**Scheduling.** An attempt re-reads the input from where the last one ran
+out; waiting until half as much input again has arrived keeps the total work
+linear. Byte buffers grow geometrically, so appending is linear too.
+
+**Errors.** On failure, the whole input is buffered anyway; once the stream
+ends it is parsed again by the plain interpreter, so the `ParseError` is the
+one a one-shot parse gives.
+
+**Compiled streaming.** Compiled parsers have a second, *resumable* build:
+
+- **Leaves.** A token parser that read within 4 units (the longest code
+  point) of the end of a partial input re-runs interpreted. Elsewhere,
+  partial and complete mode cannot disagree. Compiled token parsers leave the
+  cursor where they stopped reading, even on failure, so the check is cheap.
+  The one-pass float conversion records how far it read, and runs the
+  float parser instead when that is within 4 units of the end.
+- **End of input.** `eof`, escapes, and the first-unit switches of `alt` and
+  `dispatch` check `state.partial` themselves, and skip no branch near the
+  end of the input.
+- **Loops.** Repetitions keep the same checkpoints as the interpreter.
+
+The differential suite checks resumable builds against the interpreter, in
+partial and complete mode, on every input, and streams every example in
+chunks of many sizes, interpreted and compiled.

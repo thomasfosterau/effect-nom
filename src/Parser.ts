@@ -44,6 +44,7 @@ import type { ErrorKind } from "./ParseError.js"
 import * as ParseError from "./ParseError.js"
 import * as Compiler from "./internal/compiler/registry.js"
 import * as Entries from "./internal/entries.js"
+import * as Resume from "./internal/resume.js"
 import type { Node } from "./internal/node.js"
 import { bounds, NodeId } from "./internal/node.js"
 
@@ -1739,6 +1740,17 @@ const normalizeRange = (range: Range | undefined): [min: number, max: number] =>
 const assertConsumes = (state: State<any>, name: string): Fail =>
   state.failMessage("Cut", "Assert", `\`${name}\` parsers must always consume`)
 
+/** How far a repetition got before a streaming parse ran out of input. */
+interface FoldCheckpoint<B> {
+  readonly acc: B
+  readonly count: number
+  /** Where the next element starts. */
+  readonly pos: number
+}
+
+const saveFold = <B>(state: State<any>, key: object, entry: number, acc: B, pos: number): void =>
+  Resume.save(state, key, entry, { acc, count: 0, pos } satisfies FoldCheckpoint<B>)
+
 const foldImpl = <A, B, E, R, I extends Input>(
   self: Parser<A, E, R, I>,
   range: Range | undefined,
@@ -1750,20 +1762,38 @@ const foldImpl = <A, B, E, R, I extends Input>(
   const [min, max] = normalizeRange(range)
   const step = self.step
   const checkLoop = max === Infinity
+  const key = {}
   return described((state) => {
-    let acc = init()
-    for (let count = 0; count < max; count++) {
+    const entry = state.pos
+    let acc: B
+    let count = 0
+    const resumed = state.resume === undefined ? undefined : Resume.take(state, key, entry) as FoldCheckpoint<B>
+    if (resumed instanceof Resume.Done) {
+      state.pos = resumed.pos
+      return resumed.value as B
+    }
+    if (resumed !== undefined) {
+      acc = resumed.acc
+      count = resumed.count
+      state.pos = resumed.pos
+    } else {
+      acc = init()
+    }
+    for (; count < max; count++) {
       const start = state.pos
       const a = step(state)
       if (a === Fail) {
+        if (state.mode === "Incomplete" && state.resume !== undefined) {
+          Resume.save(state, key, entry, { acc, count, pos: start } satisfies FoldCheckpoint<B>)
+        }
         if (state.mode !== "Backtrack" || count < min) return Fail
         recover(state, start)
-        return acc
+        return Resume.done(state, key, entry, resumed !== undefined, acc)
       }
       if (checkLoop && state.pos === start) return assertConsumes(state, name)
       acc = f(acc, a)
     }
-    return acc
+    return Resume.done(state, key, entry, resumed !== undefined, acc)
   }, name, node ?? { _tag: "Fold", self, init, f, name, ...bounds(range) })
 }
 
@@ -1899,6 +1929,12 @@ export const repeatTill: {
  * @since 0.1.0
  * @category repetition
  */
+/** How far `separated` got: the elements so far, and where the next separator starts. */
+interface SeparatedCheckpoint<A> {
+  readonly acc: Array<A>
+  readonly pos: number
+}
+
 export const separated: {
   <S, E2, R2, I2 extends Input, const Rg extends Range = { readonly min: 0 }>(
     separator: Parser<S, E2, R2, I2>,
@@ -1918,34 +1954,53 @@ export const separated: {
   const step = self.step
   const sepStep = separator.step
   const checkLoop = max === Infinity
+  const key = {}
   return described((state) => {
-    const acc: Array<A> = []
-    if (max === 0) return acc
-    let start = state.pos
-    const first = step(state)
-    if (first === Fail) {
-      if (state.mode !== "Backtrack" || min > 0) return Fail
-      recover(state, start)
-      return acc
+    const entry = state.pos
+    let acc: Array<A>
+    const resumed = state.resume === undefined ? undefined : Resume.take(state, key, entry) as SeparatedCheckpoint<A>
+    if (resumed instanceof Resume.Done) {
+      state.pos = resumed.pos
+      return resumed.value as Array<A>
     }
-    acc.push(first)
-    while (acc.length < max) {
-      start = state.pos
-      if (sepStep(state) === Fail) {
-        if (state.mode !== "Backtrack" || acc.length < min) return Fail
+    if (resumed !== undefined) {
+      acc = resumed.acc
+      state.pos = resumed.pos
+    } else {
+      acc = []
+      if (max === 0) return acc
+      const start = state.pos
+      const first = step(state)
+      if (first === Fail) {
+        if (state.mode !== "Backtrack" || min > 0) return Fail
         recover(state, start)
         return acc
+      }
+      acc.push(first)
+    }
+    while (acc.length < max) {
+      const start = state.pos
+      if (sepStep(state) === Fail) {
+        if (state.mode === "Incomplete" && state.resume !== undefined) {
+          Resume.save(state, key, entry, { acc, pos: start } satisfies SeparatedCheckpoint<A>)
+        }
+        if (state.mode !== "Backtrack" || acc.length < min) return Fail
+        recover(state, start)
+        return Resume.done(state, key, entry, resumed !== undefined, acc)
       }
       if (checkLoop && state.pos === start) return assertConsumes(state, "separated")
       const a = step(state)
       if (a === Fail) {
+        if (state.mode === "Incomplete" && state.resume !== undefined) {
+          Resume.save(state, key, entry, { acc, pos: start } satisfies SeparatedCheckpoint<A>)
+        }
         if (state.mode !== "Backtrack" || acc.length < min) return Fail
         state.pos = start
-        return acc
+        return Resume.done(state, key, entry, resumed !== undefined, acc)
       }
       acc.push(a)
     }
-    return acc
+    return Resume.done(state, key, entry, resumed !== undefined, acc)
   }, "separated", { _tag: "Separated", self, separator, ...bounds(range) })
 })
 
@@ -1977,23 +2032,38 @@ export const separatedFoldl1 = <A, E, R, I extends Input, S, E2, R2, I2 extends 
 ): Parser<A, E | E2, R | R2, I & I2> => {
   const step = self.step
   const sepStep = separator.step
+  const key = {}
   return described((state) => {
-    let acc = step(state)
-    if (acc === Fail) return Fail
+    const entry = state.pos
+    const resumed = state.resume === undefined ? undefined : Resume.take(state, key, entry) as FoldCheckpoint<A>
+    let acc: A | Fail
+    if (resumed instanceof Resume.Done) {
+      state.pos = resumed.pos
+      return resumed.value as A
+    }
+    if (resumed !== undefined) {
+      acc = resumed.acc
+      state.pos = resumed.pos
+    } else {
+      acc = step(state)
+      if (acc === Fail) return Fail
+    }
     while (true) {
       const start = state.pos
       const s = sepStep(state)
       if (s === Fail) {
+        if (state.mode === "Incomplete" && state.resume !== undefined) saveFold(state, key, entry, acc, start)
         if (state.mode !== "Backtrack") return Fail
         recover(state, start)
-        return acc
+        return Resume.done(state, key, entry, resumed !== undefined, acc as A)
       }
       if (state.pos === start) return assertConsumes(state, "separatedFoldl1")
       const a = step(state)
       if (a === Fail) {
+        if (state.mode === "Incomplete" && state.resume !== undefined) saveFold(state, key, entry, acc, start)
         if (state.mode !== "Backtrack") return Fail
         state.pos = start
-        return acc
+        return Resume.done(state, key, entry, resumed !== undefined, acc as A)
       }
       acc = op(acc, s, a)
     }
