@@ -11,7 +11,7 @@
  *
  * Run with `pnpm build && pnpm bench:native`.
  */
-import { Parser, Text } from "effect-nom"
+import { Parser, Text } from "@thomasfosterau/effect-parse"
 import { json } from "../examples/json.ts"
 import { makeJson as makeFastJson } from "../examples/json-fast.ts"
 import { makeJson } from "../examples/json-text.ts"
@@ -106,7 +106,7 @@ const time = (doc: Doc, run: () => unknown): number => {
   return (performance.now() - start) / doc.batch
 }
 
-console.log("Compiled effect-nom JSON parsers vs the native JSON.parse; best of 30 interleaved runs\n")
+console.log("Compiled effect-parse JSON parsers vs the native JSON.parse; best of 30 interleaved runs\n")
 for (const doc of docs) {
   const cases = casesFor(doc)
   // Check the results before timing them

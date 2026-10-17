@@ -10,7 +10,7 @@
  * @example
  * ```ts
  * import { Effect, Stream } from "effect"
- * import { Ascii, Parser, ParserStream, Token } from "effect-nom"
+ * import { Ascii, Parser, ParserStream, Token } from "@thomasfosterau/effect-parse"
  *
  * const line = Parser.terminated(Ascii.decInt, Token.literal("\n"))
  *
@@ -329,7 +329,7 @@ export class ReadError extends Data.TaggedError("ReadError")<{ readonly cause: u
  * @example
  * ```ts
  * import { Effect } from "effect"
- * import { Parser, ParserStream, Text } from "effect-nom"
+ * import { Parser, ParserStream, Text } from "@thomasfosterau/effect-parse"
  *
  * const csvLine = Parser.separated(Text.utf8.takeTill(",\n"), Text.utf8.literal(","))
  * const csv = Parser.separated(csvLine, Text.utf8.literal("\n"))
@@ -367,7 +367,7 @@ export const parseReadable: {
  * @example
  * ```ts
  * import { Effect } from "effect"
- * import { Parser, ParserStream, Text } from "effect-nom"
+ * import { Parser, ParserStream, Text } from "@thomasfosterau/effect-parse"
  *
  * const lines = Parser.separated(Text.utf8.tillLineEnding, Text.utf8.lineEnding)
  *

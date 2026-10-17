@@ -15,7 +15,7 @@
  * Parser.parse(Parser.compile(makeJson(Text.utf8)), new TextEncoder().encode('{"a": [1, "é"]}'))
  * ```
  */
-import { Ascii, Parser, Text, Token } from "effect-nom"
+import { Ascii, Parser, Text, Token } from "@thomasfosterau/effect-parse"
 import type { Json } from "./json.js"
 
 export const makeJson = <I extends string | Uint8Array>(T: Text.TextParsers<I>): Parser.Parser<Json, never, never, I> => {

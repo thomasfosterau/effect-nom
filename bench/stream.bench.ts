@@ -16,7 +16,7 @@
  * Run with `pnpm build && pnpm bench:stream`.
  */
 import { Effect } from "effect"
-import { Parser, ParserStream, Text } from "effect-nom"
+import { Parser, ParserStream, Text } from "@thomasfosterau/effect-parse"
 import { makeJson } from "../examples/json-text.ts"
 
 const doc = JSON.stringify(

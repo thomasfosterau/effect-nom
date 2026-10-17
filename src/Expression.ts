@@ -8,7 +8,7 @@
  *
  * @example
  * ```ts
- * import { Ascii, Expression, Parser, Token } from "effect-nom"
+ * import { Ascii, Expression, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const op = (s: string) => Parser.delimited(Ascii.space0, Token.literal(s), Ascii.space0)
  *

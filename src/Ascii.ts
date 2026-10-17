@@ -7,7 +7,7 @@
  * same parsers typed for bytes:
  *
  * ```ts
- * import { Ascii, Parser } from "effect-nom"
+ * import { Ascii, Parser } from "@thomasfosterau/effect-parse"
  *
  * Parser.parse(Ascii.decUint, "42")                              // 42
  * Parser.parse(Ascii.bytes.decUint, new TextEncoder().encode("42")) // 42
@@ -419,7 +419,7 @@ export const toFloat: (s: Input) => number = numbers.toFloat
  *
  * @example
  * ```ts
- * import { Ascii, Parser } from "effect-nom"
+ * import { Ascii, Parser } from "@thomasfosterau/effect-parse"
  *
  * Parser.parse(Ascii.float, "-1.5e3") // Result.succeed(-1500)
  * ```
@@ -468,7 +468,7 @@ const atControl = (state: State<Input>, control: number): boolean => {
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const raw = Ascii.takeEscaped(Ascii.alpha1, "\\", Token.oneOf("\"n\\"))
  * Parser.parse(raw, "ab\\\"cd") // Result.succeed("ab\\\"cd")
@@ -562,7 +562,7 @@ export const takeEscapedImpl = <A, E, R, I extends Input, B, E2, R2, I2 extends 
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const unescaped = Ascii.escaped(
  *   Token.takeTill("\\\""),
@@ -668,7 +668,7 @@ type Bytes<P> = P extends Parser<infer A, infer E, infer R, infer _I> ? Parser<A
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const encode = (s: string) => new TextEncoder().encode(s)
  * const header = Parser.separatedPair(

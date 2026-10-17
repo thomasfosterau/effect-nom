@@ -1,7 +1,7 @@
 {
-  "name": "effect-nom",
-  "version": "0.1.0",
-  "description": "Parser combinators for Effect, ported from Rust's nom and winnow",
+  "name": "@thomasfosterau/effect-parse",
+  "version": "0.0.0",
+  "description": "Parser combinators for Effect, ported from Rust's nom and winnow: text, bytes, bits and token streams, streaming input, compiled parsers and Schema integration",
   "keywords": [
     "effect",
     "parser",
@@ -10,18 +10,78 @@
     "winnow",
     "typescript"
   ],
+  "homepage": "https://github.com/thomasfosterau/effect-parse#readme",
+  "bugs": {
+    "url": "https://github.com/thomasfosterau/effect-parse/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thomasfosterau/effect-parse.git"
+  },
   "license": "MIT",
+  "author": "Thomas Foster <me@thomasfoster.au>",
   "type": "module",
   "sideEffects": false,
   "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./*": {
-      "types": "./dist/*.d.ts",
-      "default": "./dist/*.js"
+    "./Input": {
+      "types": "./dist/Input.d.ts",
+      "default": "./dist/Input.js"
+    },
+    "./Parser": {
+      "types": "./dist/Parser.d.ts",
+      "default": "./dist/Parser.js"
+    },
+    "./ParseError": {
+      "types": "./dist/ParseError.d.ts",
+      "default": "./dist/ParseError.js"
+    },
+    "./Token": {
+      "types": "./dist/Token.d.ts",
+      "default": "./dist/Token.js"
+    },
+    "./Ascii": {
+      "types": "./dist/Ascii.d.ts",
+      "default": "./dist/Ascii.js"
+    },
+    "./Text": {
+      "types": "./dist/Text.d.ts",
+      "default": "./dist/Text.js"
+    },
+    "./Encoding": {
+      "types": "./dist/Encoding.d.ts",
+      "default": "./dist/Encoding.js"
+    },
+    "./Binary": {
+      "types": "./dist/Binary.d.ts",
+      "default": "./dist/Binary.js"
+    },
+    "./Bits": {
+      "types": "./dist/Bits.d.ts",
+      "default": "./dist/Bits.js"
+    },
+    "./Expression": {
+      "types": "./dist/Expression.d.ts",
+      "default": "./dist/Expression.js"
+    },
+    "./Nom": {
+      "types": "./dist/Nom.d.ts",
+      "default": "./dist/Nom.js"
+    },
+    "./ParserSchema": {
+      "types": "./dist/ParserSchema.d.ts",
+      "default": "./dist/ParserSchema.js"
+    },
+    "./ParserStream": {
+      "types": "./dist/ParserStream.d.ts",
+      "default": "./dist/ParserStream.js"
     },
     "./package.json": "./package.json"
   },
@@ -30,6 +90,9 @@
     "src",
     "!dist/**/*.tsbuildinfo"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "check": "tsc -p tsconfig.json",
     "test": "vitest run",
@@ -37,12 +100,17 @@
     "bench": "node --experimental-strip-types bench/json.bench.ts",
     "bench:native": "node --experimental-strip-types bench/native.bench.ts",
     "bench:stream": "node --experimental-strip-types bench/stream.bench.ts",
-    "prepublishOnly": "pnpm build"
+    "check:dist": "node scripts/check-dist.mjs",
+    "changeset": "changeset",
+    "version": "changeset version && pnpm install --lockfile-only",
+    "release": "bash scripts/release.sh"
   },
   "peerDependencies": {
-    "effect": "^4.0.5"
+    "effect": "^4.0.0"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^1.0.1",
+    "@changesets/cli": "^3.0.3",
     "@types/node": "^26.6.5",
     "effect": "4.0.5",
     "typescript": "^7.0.2",
