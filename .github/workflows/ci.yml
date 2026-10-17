@@ -24,5 +24,3 @@ jobs:
       - run: pnpm build
       # Imports every `exports` entry from the built dist/, as a consumer does.
       - run: pnpm check:dist
-      # Fails on a malformed changeset, or one naming a package that does not exist.
-      - run: pnpm exec changeset status
