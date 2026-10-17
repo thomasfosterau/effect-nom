@@ -8,7 +8,7 @@
  * - `lex` + `tokens`: a separate lexer producing tokens, and a parser over
  *   the token array (`parser_lexer.rs`, winnow's `TokenSlice`)
  */
-import { Ascii, Expression, Parser, Token } from "effect-nom"
+import { Ascii, Expression, Parser, Token } from "@thomasfosterau/effect-parse"
 
 const ws = <A, E>(p: Parser.Parser<A, E>) => Parser.delimited(Ascii.space0, p, Ascii.space0)
 

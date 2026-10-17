@@ -70,7 +70,7 @@ export type ErrorKind =
  * @since 0.1.0
  * @category type ids
  */
-export const TypeId: "~effect-nom/ParseError" = "~effect-nom/ParseError"
+export const TypeId: "~effect-parse/ParseError" = "~effect-parse/ParseError"
 
 /**
  * An error produced by running a parser.

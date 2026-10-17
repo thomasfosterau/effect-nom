@@ -8,7 +8,7 @@
  *
  * @example
  * ```ts
- * import { Binary, Parser } from "effect-nom"
+ * import { Binary, Parser } from "@thomasfosterau/effect-parse"
  *
  * // A length-prefixed (u16 big-endian) payload
  * const frame = Binary.lengthTake(Binary.beU16)

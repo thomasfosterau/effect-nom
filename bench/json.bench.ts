@@ -12,7 +12,7 @@
  *
  * Run with `pnpm build && pnpm bench`.
  */
-import { Encoding, Parser, Text } from "effect-nom"
+import { Encoding, Parser, Text } from "@thomasfosterau/effect-parse"
 import { json } from "../examples/json.ts"
 import { makeJson as makeFastJson } from "../examples/json-fast.ts"
 import { makeJson } from "../examples/json-text.ts"

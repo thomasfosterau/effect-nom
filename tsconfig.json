@@ -3,7 +3,7 @@
   "compilerOptions": {
     "noEmit": true,
     "paths": {
-      "effect-nom": [
+      "@thomasfosterau/effect-parse": [
         "./src/index.ts"
       ]
     }

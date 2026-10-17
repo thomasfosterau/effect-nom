@@ -10,7 +10,7 @@
  *
  * @example
  * ```ts
- * import { Binary, Bits, Parser } from "effect-nom"
+ * import { Binary, Bits, Parser } from "@thomasfosterau/effect-parse"
  *
  * // An IPv4 header starts with a 4-bit version and a 4-bit header length
  * const versionAndLength = Bits.bits(Parser.seq(Bits.take(4), Bits.take(4)))

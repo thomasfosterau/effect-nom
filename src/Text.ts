@@ -16,7 +16,7 @@
  * grammar written against `TextParsers<I>` parses all of them:
  *
  * ```ts
- * import { Parser, Text } from "effect-nom"
+ * import { Parser, Text } from "@thomasfosterau/effect-parse"
  *
  * const greeting = <I extends string | Uint8Array>(T: Text.TextParsers<I>) =>
  *   Parser.preceded(T.literal("¡hola "), T.identifier)
@@ -91,7 +91,7 @@ const makePredicate = (name: string, re: RegExp): CharPredicate => {
  *
  * @example
  * ```ts
- * import { Text } from "effect-nom"
+ * import { Text } from "@thomasfosterau/effect-parse"
  *
  * const greek = Text.string.takeWhile(Text.property("Script=Greek"), { min: 1 })
  * ```
@@ -375,7 +375,7 @@ const expectedIdentifier = ["identifier"]
  *
  * @example
  * ```ts
- * import { Encoding, Parser, Text } from "effect-nom"
+ * import { Encoding, Parser, Text } from "@thomasfosterau/effect-parse"
  *
  * const T = Text.make(Encoding.latin1)
  * Parser.parse(T.alpha1, new Uint8Array([0x63, 0x61, 0x66, 0xe9])) // "café"
@@ -720,7 +720,7 @@ export const string: TextParsers<string> = make(Encodings.string)
  *
  * @example
  * ```ts
- * import { Parser, Text } from "effect-nom"
+ * import { Parser, Text } from "@thomasfosterau/effect-parse"
  *
  * const bytes = new TextEncoder().encode("naïve café")
  * Parser.parse(Parser.separatedPair(Text.utf8.alpha1, Text.utf8.space1, Text.utf8.alpha1), bytes)

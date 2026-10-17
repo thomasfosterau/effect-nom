@@ -9,7 +9,7 @@
  * reports `Incomplete`.
  *
  * ```ts
- * import { Encoding, Text } from "effect-nom"
+ * import { Encoding, Text } from "@thomasfosterau/effect-parse"
  *
  * Text.utf8.encoding === Encoding.utf8
  * Text.make(Encoding.latin1) // the Text parsers for any Encoding, including your own
@@ -112,7 +112,7 @@ export const latin1: Encoding<Uint8Array> = internal.latin1
  *
  * @example
  * ```ts
- * import { Encoding } from "effect-nom"
+ * import { Encoding } from "@thomasfosterau/effect-parse"
  *
  * Encoding.sniff(new Uint8Array([0xff, 0xfe, 0x41, 0x00])) // Option.some(Encoding.utf16le)
  * ```

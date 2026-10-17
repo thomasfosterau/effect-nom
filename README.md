@@ -1,10 +1,10 @@
-# effect-nom
+# effect-parse
 
 Parser combinators for [Effect](https://effect.website), ported from Rust's
 [nom](https://github.com/rust-bakery/nom) and
 [winnow](https://github.com/winnow-rs/winnow).
 
-effect-nom keeps the core model of nom and winnow: small parsers composed
+effect-parse keeps the core model of nom and winnow: small parsers composed
 into larger ones; `Backtrack` / `Cut` / `Incomplete` error modes; one set of
 parsers for both complete and streaming input; text, bytes, bits and token
 streams. On top of that it follows Effect's conventions:
@@ -16,7 +16,7 @@ streams. On top of that it follows Effect's conventions:
 - `Option`, `Result`, `Effect`, `Stream` and `Schema` integration
 
 ```ts
-import { Ascii, Parser, Token } from "effect-nom"
+import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
 
 const point = Parser.gen(function*() {
   yield* Token.literal("(")
@@ -41,10 +41,17 @@ Parser.parse(point, "(1;-2)")
 ## Installation
 
 ```sh
-pnpm add effect-nom effect
+pnpm add @thomasfosterau/effect-parse effect
 ```
 
-effect-nom requires `effect` 4.x as a peer dependency.
+effect-parse requires `effect` 4.x (`^4.0.0`) as a peer dependency; the
+consuming application owns the single copy of `effect`.
+
+Every module is available from the root entry as a namespace, and also on its
+own subpath (`@thomasfosterau/effect-parse/Parser`, `…/Ascii`, and so on).
+
+The package was developed as `effect-nom`. Releases and the changelog are
+managed with Changesets; see [PUBLISHING.md](PUBLISHING.md).
 
 ## Contents
 
@@ -86,7 +93,7 @@ There are three styles, and they mix freely.
 **Combinators**, data-first or piped:
 
 ```ts
-import { Ascii, Parser, Token } from "effect-nom"
+import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
 
 const keyValue = Parser.separatedPair(
   Ascii.alpha1,
@@ -272,7 +279,7 @@ while parsing array
 expected value, found ","
 ```
 
-effect-nom tries hard to produce good messages without annotations:
+effect-parse tries hard to produce good messages without annotations:
 
 - `alt` merges the expectations of failed branches:
   `expected "true", "false" or "null"`.
@@ -299,7 +306,7 @@ const port = Ascii.decUint.pipe(
 ## Streaming and partial input
 
 nom has separate `streaming` and `complete` modules. winnow marks the input
-as `Partial`. In effect-nom, partiality is decided by the runner, so every
+as `Partial`. In effect-parse, partiality is decided by the runner, so every
 parser works in both modes:
 
 ```ts
@@ -315,7 +322,7 @@ ends:
 
 ```ts
 import { Effect, Stream } from "effect"
-import { Ascii, Parser, ParserStream, Token } from "effect-nom"
+import { Ascii, Parser, ParserStream, Token } from "@thomasfosterau/effect-parse"
 
 const line = Parser.terminated(Ascii.decInt, Token.literal("\n"))
 
@@ -335,7 +342,7 @@ bytes, without decoding it first or waiting for the download:
 
 ```ts
 import { Effect } from "effect"
-import { Parser, ParserStream, Text } from "effect-nom"
+import { Parser, ParserStream, Text } from "@thomasfosterau/effect-parse"
 
 const json = Parser.compile(makeJson(Text.utf8)) // see examples/json-text.ts
 
@@ -389,7 +396,7 @@ returns `string`s. A grammar written once against `TextParsers<I>`
 therefore parses any of these inputs:
 
 ```ts
-import { Encoding, Parser, Text } from "effect-nom"
+import { Encoding, Parser, Text } from "@thomasfosterau/effect-parse"
 
 const assignment = <I extends string | Uint8Array>(T: Text.TextParsers<I>) =>
   Parser.separatedPair(T.identifier, Parser.delimited(T.space0, T.literal("≔"), T.space0), T.decInt)
@@ -465,7 +472,7 @@ Token.oneOf<ReadonlyArray<Tok>>((t) => t.kind === "Number")
 
 ## Coming from nom or winnow
 
-| nom | winnow | effect-nom |
+| nom | winnow | effect-parse |
 |---|---|---|
 | `tag("x")` | `"x"`, `literal("x")` | `Token.literal("x")` |
 | `char('x')` | `'x'` | `Token.literal("x")` |

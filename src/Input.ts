@@ -1,7 +1,7 @@
 /**
  * Input types and the mutable parse {@link State} cursor.
  *
- * Like winnow, effect-nom parsers advance a mutable cursor rather than
+ * Like winnow, effect-parse parsers advance a mutable cursor rather than
  * returning the remaining input. A {@link State} wraps the original input
  * together with the current offset, the streaming (partial) flag, the
  * services available to the parser, and the details of the most recent
@@ -58,7 +58,7 @@ export type Source<I> = I | ([I] extends [Uint8Array] ? BinaryInput : never)
  *
  * @example
  * ```ts
- * import { Input } from "effect-nom"
+ * import { Input } from "@thomasfosterau/effect-parse"
  *
  * Input.fromSource(new Uint16Array([0x41]).buffer) // Uint8Array [0x41, 0x00]
  * ```
@@ -109,7 +109,7 @@ export type Slice<I> = I extends string ? string
  * @since 0.1.0
  * @category failure
  */
-export const Fail: unique symbol = Symbol.for("effect-nom/Fail")
+export const Fail: unique symbol = Symbol.for("effect-parse/Fail")
 
 /**
  * @since 0.1.0

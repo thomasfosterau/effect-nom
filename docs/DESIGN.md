@@ -1,7 +1,7 @@
-# effect-nom design
+# effect-parse design
 
-This document records the research behind effect-nom and the plan used to
-build it. effect-nom is a port of two Rust parser-combinator libraries,
+This document records the research behind effect-parse and the plan used to
+build it. effect-parse is a port of two Rust parser-combinator libraries,
 [nom](https://github.com/rust-bakery/nom) (8.x) and
 [winnow](https://github.com/winnow-rs/winnow) (0.7.x), to TypeScript, written
 in the style of [Effect](https://effect.website) 4.
@@ -68,7 +68,7 @@ winnow forked from nom and changed a few things that matter here:
 
 ## 2. Synthesis: decisions
 
-| Topic | nom | winnow | effect-nom |
+| Topic | nom | winnow | effect-parse |
 |---|---|---|---|
 | Parser signature | `I -> Result<(I, O), Err<E>>` | `&mut I -> Result<O, ErrMode<E>>` | Mutable cursor like winnow (`(state) => A \| Fail`), for speed and cheap backtracking |
 | Type | `impl Parser<I>` | `impl Parser<I, O, E>` | `Parser<A, E = never, R = never, I = string>`, ordered like Effect's `Effect<A, E, R>` with the input type last |
@@ -122,7 +122,7 @@ is typed for bytes only.
 ### Text and encodings
 
 nom and winnow parse `&str` and `&[u8]`, and their character parsers are
-ASCII. effect-nom adds a `Text` module for Unicode text in any encoding.
+ASCII. effect-parse adds a `Text` module for Unicode text in any encoding.
 
 **One implementation, many encodings.** An `Encoding` is a small record:
 `decode(input, offset, end)` returns a code point, *malformed* (-1) or
@@ -281,7 +281,7 @@ JSON example the combinators take ~37 ms for a 0.5 MB document, while the
 same grammar fused by hand into straight-line code takes ~4.7 ms. Turning
 off error bookkeeping only saves 0–7%, so the cost is the structure, not the
 diagnostics. Rust gets winnow the fused version through monomorphization and
-inlining; effect-nom has to do it itself.
+inlining; effect-parse has to do it itself.
 
 The approach follows Effect 4's Schema compiler (`SchemaCompiler`,
 `internal/schema/compilerRegistry.ts`, `internal/schema/codegen.ts`,

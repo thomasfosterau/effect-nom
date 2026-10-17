@@ -1,0 +1,63 @@
+name: Release
+
+# Changesets release flow, as in the owner's other Effect libraries: on every
+# push to `main`, changesets/action either opens/updates the "chore: version
+# packages" PR (while unreleased changesets exist) or, once that PR has merged
+# and no changesets remain, publishes the package to npm via OIDC trusted
+# publishing and tags the release. There is no NPM_TOKEN; see PUBLISHING.md.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+
+# No permissions by default; the release job opts into exactly what it needs.
+permissions: {}
+
+jobs:
+  release:
+    name: Version or publish
+    # Never runs on forks, or before the repository is renamed to the name the
+    # npm trusted publisher is bound to.
+    if: github.repository == 'thomasfosterau/effect-parse'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Protected environment: publishing waits for a required reviewer.
+    environment: release
+    permissions:
+      contents: write # push the version tag and the version PR branch
+      pull-requests: write # open/update the version PR
+      id-token: write # OIDC: prove this workflow's identity to npm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # No lifecycle scripts while the job holds `id-token: write`: a
+      # compromised dependency's install hook cannot run here.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # npm >= 11.5.1 performs the OIDC exchange for `npm publish`. Pinned
+      # exactly, so this job runs a reviewed version; bump it by hand.
+      - name: Upgrade npm (OIDC trusted publishing)
+        run: npm install -g npm@11.20.0
+
+      - run: pnpm build
+
+      - name: Create version PR or publish to npm
+        # v2 of the action pairs with Changesets CLI v3.
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          version-script: pnpm run version
+          publish-script: pnpm run release
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -5,7 +5,7 @@
  * started (for precise errors), `escaped` for string escapes, and
  * `expected` to name grammar rules in error messages.
  */
-import { Ascii, Parser, Token } from "effect-nom"
+import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
 
 export type Json =
   | null

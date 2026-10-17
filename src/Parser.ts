@@ -13,7 +13,7 @@
  * be written with generators:
  *
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const point = Parser.gen(function*() {
  *   yield* Token.literal("(")
@@ -56,7 +56,7 @@ import { bounds, NodeId } from "./internal/node.js"
  * @since 0.1.0
  * @category type ids
  */
-export const TypeId: "~effect-nom/Parser" = "~effect-nom/Parser"
+export const TypeId: "~effect-parse/Parser" = "~effect-parse/Parser"
 
 /**
  * A parser that consumes input of type `I`, producing a value of type `A`,
@@ -261,7 +261,7 @@ const isTwoParserArgs = (args: IArguments) => isParser(args[0]) && isParser(args
  *
  * @example
  * ```ts
- * import { Parser } from "effect-nom"
+ * import { Parser } from "@thomasfosterau/effect-parse"
  *
  * // Parses a single ASCII uppercase letter
  * const upper = Parser.make<string>((state) => {
@@ -412,7 +412,7 @@ export const todo: Parser<never, never, never, Input> = described<never, never, 
  *
  * @example
  * ```ts
- * import { Parser, Token } from "effect-nom"
+ * import { Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * type Nested = ReadonlyArray<Nested>
  * const nested: Parser.Parser<Nested> = Parser.delimited(
@@ -494,7 +494,7 @@ export const map: {
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const entry = Parser.separatedPair(Ascii.alpha1, Token.literal("="), Ascii.decUint)
  * const record = Parser.fromEntries(Parser.separated(entry, Token.literal(",")))
@@ -596,7 +596,7 @@ export const flatMap: {
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * // Take exactly 4 characters, then require them all to be digits
  * const year = Token.take(4).pipe(Parser.mapParser(Parser.allConsuming(Ascii.decUint)))
@@ -881,7 +881,7 @@ const changeMode = <A, E, R, I extends Input>(
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * // Once we have seen "-", a number must follow
  * const negative = Parser.preceded(Token.literal("-"), Parser.cut(Ascii.decUint))
@@ -1451,7 +1451,7 @@ export const separatedPair = <
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const keyValue = Parser.gen(function*() {
  *   const key = yield* Ascii.alpha1
@@ -1486,7 +1486,7 @@ export const gen = <Eff extends Parser.Any, AEff>(
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const range = Parser.Do.pipe(
  *   Parser.bind("start", () => Ascii.decUint),
@@ -1611,7 +1611,7 @@ export const alt = <const Ps extends ReadonlyArray<Parser.Any>>(
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const escape = Parser.preceded(
  *   Token.literal("\\"),
@@ -1811,7 +1811,7 @@ const foldImpl = <A, B, E, R, I extends Input>(
  *
  * @example
  * ```ts
- * import { Parser, Token } from "effect-nom"
+ * import { Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const abs = Parser.repeat(Token.literal("ab"), { min: 1 })
  * Parser.parse(abs, "ababab") // Result.succeed(["ab", "ab", "ab"])
@@ -1920,7 +1920,7 @@ export const repeatTill: {
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const csv = Parser.separated(Ascii.decInt, Token.literal(","))
  * Parser.parse(csv, "1,2,3") // Result.succeed([1, 2, 3])
@@ -2012,7 +2012,7 @@ export const separated: {
  *
  * @example
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const sum = Parser.separatedFoldl1(
  *   Ascii.decInt,
@@ -2136,7 +2136,7 @@ export const separatedFoldr1 = <A, E, R, I extends Input, S, E2, R2, I2 extends 
  * @example
  * ```ts
  * import { Context } from "effect"
- * import { Ascii, Parser } from "effect-nom"
+ * import { Ascii, Parser } from "@thomasfosterau/effect-parse"
  *
  * class Radix extends Context.Service<Radix, number>()("Radix") {}
  *
@@ -2401,7 +2401,7 @@ export interface CompileOptions {
  * is defined:
  *
  * ```ts
- * import { Ascii, Parser, Token } from "effect-nom"
+ * import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * export const list = Parser.compile(
  *   Parser.separated(Ascii.decInt, Token.literal(","))
@@ -2533,7 +2533,7 @@ const runComplete = <A, E, R, I extends Input>(
  * @example
  * ```ts
  * import { Result } from "effect"
- * import { Ascii, Parser } from "effect-nom"
+ * import { Ascii, Parser } from "@thomasfosterau/effect-parse"
  *
  * Parser.parse(Ascii.decInt, "-42") // Result.succeed(-42)
  * Result.isFailure(Parser.parse(Ascii.decInt, "42x")) // true
@@ -2637,7 +2637,7 @@ export type PartialResult<A> =
  *
  * @example
  * ```ts
- * import { Ascii, Parser } from "effect-nom"
+ * import { Ascii, Parser } from "@thomasfosterau/effect-parse"
  *
  * Parser.parsePartial(Ascii.digit1, "123")
  * // Result.succeed({ _tag: "Incomplete", needed: Option.some(1) })
@@ -2681,7 +2681,7 @@ export const parsePartial: {
  * @example
  * ```ts
  * import { Effect } from "effect"
- * import { Ascii, Parser } from "effect-nom"
+ * import { Ascii, Parser } from "@thomasfosterau/effect-parse"
  *
  * const program = Effect.gen(function*() {
  *   const n = yield* Parser.parseEffect(Ascii.decInt, "42")

@@ -3,7 +3,7 @@
  *
  * Shows a `Parser.gen` generator-style parser next to combinator style.
  */
-import { Ascii, Parser, Token } from "effect-nom"
+import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
 
 export type Ini = ReadonlyMap<string, ReadonlyMap<string, string>>
 

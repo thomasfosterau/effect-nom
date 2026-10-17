@@ -20,7 +20,7 @@ export const End = -3
  * Units below this value decode to themselves with width 1, so hot loops can
  * skip `decode`. Defaults to 0x80 for ASCII compatible encodings.
  */
-const FastLimit: unique symbol = Symbol.for("effect-nom/Encoding/FastLimit")
+const FastLimit: unique symbol = Symbol.for("effect-parse/Encoding/FastLimit")
 
 /** @internal */
 export const fastLimit = (enc: Encoding<any>): number =>

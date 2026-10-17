@@ -7,7 +7,7 @@
  * `ParseError`, typed in the parser's `E` channel.
  */
 import { Data, Result } from "effect"
-import { Ascii, Parser, Token } from "effect-nom"
+import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
 
 export type Atom =
   | { readonly _tag: "Num"; readonly value: number }

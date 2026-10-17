@@ -5,7 +5,7 @@
  * input (`ParserStream.parseMany`), since partiality is a property of how
  * it is run, as in winnow's `parser_streaming.rs`.
  */
-import { Ascii, Parser, Token } from "effect-nom"
+import { Ascii, Parser, Token } from "@thomasfosterau/effect-parse"
 
 export interface Request {
   readonly method: string

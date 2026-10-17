@@ -9,7 +9,7 @@
  * @example
  * ```ts
  * import { Schema } from "effect"
- * import { Ascii, Parser, ParserSchema, Token } from "effect-nom"
+ * import { Ascii, Parser, ParserSchema, Token } from "@thomasfosterau/effect-parse"
  *
  * const Version = ParserSchema.make(
  *   Parser.struct({

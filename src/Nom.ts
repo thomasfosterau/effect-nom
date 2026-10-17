@@ -1,11 +1,11 @@
 /**
- * nom-flavoured names for effect-nom's parsers and combinators.
+ * nom-flavoured names for effect-parse's parsers and combinators.
  *
- * effect-nom's main API follows winnow's naming (in camelCase). This module
+ * effect-parse's main API follows winnow's naming (in camelCase). This module
  * offers the names, and argument orders, that nom users know, so grammars
  * can be ported with minimal changes:
  *
- * | nom | effect-nom |
+ * | nom | effect-parse |
  * |---|---|
  * | `tag("abc")` | `Token.literal("abc")` |
  * | `many0(p)` | `Parser.repeat(p)` |
@@ -21,7 +21,7 @@
  * @example
  * ```ts
  * import { Result } from "effect"
- * import { Nom, Parser } from "effect-nom"
+ * import { Nom, Parser } from "@thomasfosterau/effect-parse"
  *
  * const hexPrimary = Nom.mapRes(
  *   Nom.takeWhileMN(2, 2, (c: string) => /[0-9a-fA-F]/.test(c)),

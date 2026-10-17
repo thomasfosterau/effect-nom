@@ -8,7 +8,7 @@
  * parameter that defaults to `string`:
  *
  * ```ts
- * import { Token } from "effect-nom"
+ * import { Token } from "@thomasfosterau/effect-parse"
  *
  * Token.take(4)              // Parser<string, never, never, string>
  * Token.take<Uint8Array>(4)  // Parser<Uint8Array, never, never, Uint8Array>
@@ -147,7 +147,7 @@ export const any: Parser<string> = described(anyStep as any, "any", { _tag: "Any
  *
  * @example
  * ```ts
- * import { Parser, Token } from "effect-nom"
+ * import { Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const byte = Token.anyToken<Uint8Array>()
  * Parser.parse(byte, new Uint8Array([7])) // Result.succeed(7)
@@ -165,7 +165,7 @@ export const anyToken = <I extends Input = string>(): Parser<Token<NoInfer<I>>, 
  *
  * @example
  * ```ts
- * import { Parser, Token } from "effect-nom"
+ * import { Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const keyword = Parser.alt(Token.literal("true"), Token.literal("false"))
  * //    ^? Parser<"true" | "false">
@@ -212,7 +212,7 @@ export const literalImpl = (lit: Input, caseless: boolean): Parser<any, never, n
  *
  * @example
  * ```ts
- * import { Parser, Token } from "effect-nom"
+ * import { Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const sign = Token.oneOf("+-")
  * const lower = Token.oneOf(Token.range("a", "z"))
@@ -307,7 +307,7 @@ export const takeWhileImpl = <I extends Input>(
  *
  * @example
  * ```ts
- * import { Parser, Token } from "effect-nom"
+ * import { Parser, Token } from "@thomasfosterau/effect-parse"
  *
  * const identifier = Token.takeWhile(
  *   [Token.range("a", "z"), Token.range("A", "Z"), "_"],
